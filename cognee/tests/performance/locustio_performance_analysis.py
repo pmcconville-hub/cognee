@@ -284,4 +284,54 @@ class SingleDatasetCogneeTest(HttpUser):
 
 
 if __name__ == "__main__":
-    import os
+    import asyncio
+    import subprocess
+    import sys
+    import time
+    import urllib.error
+    import urllib.request
+
+    import cognee
+    from cognee.modules.users.api_key import create_api_key
+    from cognee.modules.users.methods import create_default_user
+
+    async def bootstrap() -> str:
+        await cognee.prune.prune_data()
+        await cognee.prune.prune_system(metadata=True)
+        user = await create_default_user()
+        api_key_obj = await create_api_key(user, name="locust-loadtest")
+        return api_key_obj.api_key
+
+    def wait_for_server(url: str, timeout: float = 240.0) -> None:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                with urllib.request.urlopen(url, timeout=2) as resp:
+                    if resp.status == 200:
+                        return
+            except (urllib.error.URLError, ConnectionError):
+                pass
+            time.sleep(0.5)
+        raise SystemExit(f"Cognee server at {url} did not become ready in {timeout}s")
+
+    api_key = asyncio.run(bootstrap())
+
+    host = os.environ.get("HTTP_API_HOST", "localhost")
+    port = os.environ.get("HTTP_API_PORT", "8000")
+    base_url = f"http://{host}:{port}"
+
+    server_proc = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "cognee.api.client:app", "--host", host, "--port", port]
+    )
+    try:
+        wait_for_server(f"{base_url}/health")
+        env = {**os.environ, "COGNEE_API_KEY": api_key}
+        cmd = ["locust", "-f", __file__, "--host", base_url, *sys.argv[1:]]
+        rc = subprocess.run(cmd, env=env).returncode
+    finally:
+        server_proc.terminate()
+        try:
+            server_proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            server_proc.kill()
+    sys.exit(rc)
