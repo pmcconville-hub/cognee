@@ -20,6 +20,8 @@ from typing import Optional
 
 
 def _safe_close(obj) -> None:
+    if obj is None:
+        return
     try:
         obj.close()
     except Exception:
@@ -47,6 +49,12 @@ def install_json_extension_local(
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         temp_db_path = os.path.join(tmp_dir, "kuzu-json-install")
+        # Initialize handles to None so cleanup in ``finally`` works even if
+        # ``Database(...)`` itself raises (e.g. invalid kwargs, OOM at init).
+        # Without this, an outer-except-only flow would skip ``tmp_db.close()``
+        # and leak the native object until GC.
+        tmp_db = None
+        conn = None
         try:
             kwargs = {"buffer_pool_size": buffer_pool_size}
             if max_db_size is not None:
@@ -58,8 +66,10 @@ def install_json_extension_local(
                 conn.execute("INSTALL JSON;")
             except Exception:
                 pass
-            finally:
-                _safe_close(conn)
-                _safe_close(tmp_db)
         except Exception:
+            # Best-effort install: missing/incompatible JSON extension and
+            # init failures all surface here. The cleanup below still runs.
             pass
+        finally:
+            _safe_close(conn)
+            _safe_close(tmp_db)

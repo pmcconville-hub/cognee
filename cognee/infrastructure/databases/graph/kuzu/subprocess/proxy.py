@@ -150,7 +150,11 @@ class RemoteKuzuDatabase:
         )
 
     def init_database(self) -> None:
-        self._session.call(Request(op=OP_DB_INIT, handle_id=self._handle_id))
+        # Use the validated property so a use-after-close fails locally with
+        # ``RuntimeError("database handle closed")`` rather than sending
+        # ``handle_id=None`` to the worker, which would surface as a
+        # confusing protocol error far from the bug.
+        self._session.call(Request(op=OP_DB_INIT, handle_id=self.handle_id))
         self._initialized = True
         # After the first init, replay it too — lambda reads the current
         # (possibly remapped) handle_id at replay time.
@@ -213,10 +217,13 @@ class RemoteKuzuConnection:
         """Execute a query; return a ``QueryResult``-like iterator of fully
         materialized rows.
         """
+        # ``self.handle_id`` (property) raises if the connection was closed,
+        # so a use-after-close fails locally instead of sending
+        # ``handle_id=None`` to the worker.
         resp = self._session.call(
             Request(
                 op=OP_CONN_EXECUTE_FETCH_ALL,
-                handle_id=self._handle_id,
+                handle_id=self.handle_id,
                 args=(query, params),
             )
         )
@@ -225,7 +232,7 @@ class RemoteKuzuConnection:
 
     def load_extension(self, name: str) -> None:
         self._session.call(
-            Request(op=OP_LOAD_EXTENSION, handle_id=self._handle_id, args=(name,))
+            Request(op=OP_LOAD_EXTENSION, handle_id=self.handle_id, args=(name,))
         )
         # Replay the same extension load on any fresh connection.
         self._session.add_replay_step(

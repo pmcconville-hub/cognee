@@ -12,8 +12,6 @@ Covers the scenarios that used to silently hang or leak:
 from __future__ import annotations
 
 import multiprocessing as mp
-import os
-import signal
 import time
 
 import pytest
@@ -168,11 +166,11 @@ def test_worker_killed_mid_request_flips_closed():
     # transport error and flips closed.
     session = _start_session()
     try:
-        os.kill(session.pid, signal.SIGKILL)
+        session._proc.kill()
         deadline = time.time() + 5
         while session._proc.is_alive() and time.time() < deadline:
             time.sleep(0.05)
-        assert not session._proc.is_alive(), "worker did not die after SIGKILL"
+        assert not session._proc.is_alive(), "worker did not die after kill()"
 
         with pytest.raises(SubprocessTransportError, match="Subprocess exited unexpectedly"):
             session.call(Request(op=OP_ECHO, args=("hi",)))
@@ -286,7 +284,7 @@ def test_retry_on_worker_sigkill_succeeds():
         assert session.call(Request(op=OP_ECHO, args=("a",))).result == "a"
         original_pid = session.pid
 
-        os.kill(session.pid, signal.SIGKILL)
+        session._proc.kill()
         # Give it a moment so the next call trips is_alive checks, not the
         # faster "already dead on entry" path.
         deadline = time.time() + 3
@@ -322,7 +320,7 @@ def test_retry_gives_up_after_max_retries():
 
         session._respawn_factory = _stillborn_spawn
 
-        os.kill(session.pid, signal.SIGKILL)
+        session._proc.kill()
         _wait_for_worker_exit(session)
 
         with pytest.raises(SubprocessTransportError):
@@ -368,7 +366,7 @@ def test_replay_steps_fire_on_respawn():
             ReplayStep(make_request=_make_replay_req, apply_new_handle=None)
         )
 
-        os.kill(session.pid, signal.SIGKILL)
+        session._proc.kill()
         _wait_for_worker_exit(session)
 
         # First call after crash triggers: respawn → replay (one step) →
@@ -412,7 +410,7 @@ async def test_kuzu_adapter_survives_worker_sigkill(tmp_path):
         # Now SIGKILL the worker.
         session = adapter._session
         old_pid = session.pid
-        os.kill(session.pid, signal.SIGKILL)
+        session._proc.kill()
         _wait_for_worker_exit(session)
 
         # Next query should respawn + replay + retry transparently. The Kuzu

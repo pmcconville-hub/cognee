@@ -100,7 +100,17 @@ class LanceDBAdapter(VectorDBInterface):
         and ``session`` is a ``LanceDBSubprocessSession``. In local mode both
         are ``None`` and the adapter lazily creates a ``lancedb.AsyncConnection``
         on first use.
+
+        Mixing the two — e.g. passing ``connection`` without ``session`` —
+        creates an adapter no one owns: ``get_connection()`` would return a
+        remote connection whose worker the adapter cannot shut down, leaving
+        an orphaned subprocess on close. Reject up front.
         """
+        if (connection is None) != (session is None):
+            raise ValueError(
+                "LanceDBAdapter requires both `connection` and `session` "
+                "in subprocess mode, or neither in local mode."
+            )
         self.url = url
         self.api_key = api_key
         self.embedding_engine = embedding_engine
@@ -181,11 +191,11 @@ class LanceDBAdapter(VectorDBInterface):
         return lance_model_cls.to_arrow_schema()
 
     def _records_for_write(self, records):
-        """Convert LanceModel instances to a typed pyarrow RecordBatch in
+        """Convert LanceModel instances to a typed ``pa.Table`` in
         subprocess mode so the worker never needs to see pydantic. The
-        RecordBatch carries both the data and the schema (derived from the
-        LanceModel class via ``to_arrow_schema``) so LanceDB gets the exact
-        types it expects.
+        Table carries both the data and the schema (derived from the
+        LanceModel class via ``to_arrow_schema``) so LanceDB gets the
+        exact types it expects.
         """
         if not records:
             return records

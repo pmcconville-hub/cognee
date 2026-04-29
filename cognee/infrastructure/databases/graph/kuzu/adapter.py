@@ -159,12 +159,14 @@ class KuzuAdapter(GraphDBInterface):
         # Install the JSON extension via a throwaway DB so its presence is
         # cached before we open the real database. Shared helper lives in
         # cognee_db_workers so the subprocess worker can use the same code
-        # without importing cognee.
+        # without importing cognee. Pass the instance's configured limits
+        # so callers that tune ``kuzu_buffer_pool_size`` / ``kuzu_max_db_size``
+        # via env or config aren't silently ignored during the install step.
         from cognee_db_workers._kuzu_helpers import install_json_extension_local
 
         install_json_extension_local(
-            buffer_pool_size=DEFAULT_KUZU_BUFFER_POOL_SIZE,
-            max_db_size=DEFAULT_KUZU_MAX_DB_SIZE,
+            buffer_pool_size=self.kuzu_buffer_pool_size,
+            max_db_size=self.kuzu_max_db_size,
         )
 
         try:
