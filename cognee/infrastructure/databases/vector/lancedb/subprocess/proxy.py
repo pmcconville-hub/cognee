@@ -263,18 +263,26 @@ class RemoteLanceDBTable:
             self._session, self.handle_id, OP_TABLE_MERGE_INSERT_EXECUTE, (key,)
         )
 
-    # Parity with lancedb's context manager protocol (used as `with table:` in
-    # older adapter snippets). Both enter/exit are no-ops here.
+    # Context-manager protocol. Upstream ``lancedb.AsyncTable`` only defines
+    # the sync ``__enter__`` / ``__exit__`` pair (its ``__exit__`` calls
+    # ``close()``); we additionally support ``async with`` since the proxy is
+    # async-first and the async release is the cheaper path under an event
+    # loop. Both exits release the worker-side handle and deregister the
+    # replay step — using the table after exit raises ``RuntimeError`` from
+    # the ``handle_id`` property, matching upstream's
+    # "any attempt to use the table after it has been closed will raise".
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        self.release_sync()
         return False
 
     async def __aenter__(self):
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.release()
         return False
 
 

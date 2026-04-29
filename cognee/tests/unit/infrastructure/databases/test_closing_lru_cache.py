@@ -139,6 +139,49 @@ def test_eviction_async_close_under_running_loop_completes():
     )
 
 
+def test_eviction_async_close_failure_is_logged_under_running_loop(caplog):
+    """When async ``close()`` raises under a running loop, the failure must
+    surface through the same ``logger.warning`` channel as the sync /
+    ``asyncio.run()`` paths — not just as Python's "Task exception was never
+    retrieved" warning at task GC time.
+    """
+    import asyncio
+    import logging
+
+    class _RaisingAsyncCloseable:
+        async def close(self):
+            raise RuntimeError("boom in async close")
+
+    cache = ClosingLRUCache(maxsize=1)
+
+    async def run():
+        cache.get_or_create("a", lambda: _RaisingAsyncCloseable())
+        # Triggers eviction of the raising entry while a loop is running.
+        cache.get_or_create("b", lambda: _Closeable("b"))
+        # Yield so the scheduled task runs to completion.
+        for _ in range(3):
+            await asyncio.sleep(0)
+
+    with caplog.at_level(
+        logging.WARNING,
+        logger="cognee.infrastructure.databases.utils.closing_lru_cache",
+    ):
+        asyncio.run(run())
+
+    matching = [
+        r
+        for r in caplog.records
+        if "Failed to run async close()" in r.getMessage()
+        and "_RaisingAsyncCloseable" in r.getMessage()
+    ]
+    assert matching, (
+        "async close() exception under running loop must be logged via "
+        "logger.warning, but no matching record was captured"
+    )
+    # The structured log should carry exc_info for ops grep-ability.
+    assert matching[0].exc_info is not None
+
+
 # -- ClosingLRUCache: cache_clear --------------------------------------------
 
 
@@ -272,3 +315,88 @@ def test_decorator_kwargs_are_part_of_cache_key():
 
     assert r1 is not r2
     assert r1 is r3
+
+
+# -- maxsize semantics: parity with functools.lru_cache ---------------------
+
+
+def test_maxsize_zero_disables_cache():
+    """maxsize=0 — like functools.lru_cache(maxsize=0): factory runs every
+    call, nothing is stored, close() is NOT called (caller owns the value)."""
+    import pytest
+
+    cache = ClosingLRUCache(maxsize=0)
+    a = _Closeable("a")
+    b = _Closeable("a-second")
+
+    r1 = cache.get_or_create("k", lambda: a)
+    r2 = cache.get_or_create("k", lambda: b)
+
+    assert r1 is a
+    assert r2 is b
+    assert a.closed is False, "disabled mode must not close caller-owned values"
+    assert b.closed is False
+    assert cache.cache_info()["size"] == 0
+
+
+def test_maxsize_negative_clamped_to_zero():
+    """Negative maxsize behaves like maxsize=0 (parity with lru_cache)."""
+    cache = ClosingLRUCache(maxsize=-5)
+    assert cache.cache_info()["maxsize"] == 0
+    obj = _Closeable("a")
+    result = cache.get_or_create("k", lambda: obj)
+    assert result is obj
+    assert obj.closed is False
+    assert cache.cache_info()["size"] == 0
+
+
+def test_maxsize_none_is_unbounded():
+    """maxsize=None — never evicts, like functools.lru_cache(maxsize=None)."""
+    cache = ClosingLRUCache(maxsize=None)
+    objs = [_Closeable(str(i)) for i in range(50)]
+    for i, obj in enumerate(objs):
+        cache.get_or_create(i, lambda obj=obj: obj)
+
+    # No evictions should have happened.
+    for obj in objs:
+        assert obj.closed is False
+    assert cache.cache_info()["size"] == 50
+
+
+def test_invalid_maxsize_type_raises():
+    """Non-int, non-None maxsize raises TypeError on construction."""
+    import pytest
+
+    with pytest.raises(TypeError):
+        ClosingLRUCache(maxsize="bad")  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        ClosingLRUCache(maxsize=1.5)  # type: ignore[arg-type]
+
+
+def test_decorator_maxsize_zero_disables_cache():
+    """The decorator honors maxsize=0 the same way the class does."""
+    call_count = 0
+
+    @closing_lru_cache(maxsize=0)
+    def create(key):
+        nonlocal call_count
+        call_count += 1
+        return _Closeable(key)
+
+    r1 = create("x")
+    r2 = create("x")
+    assert r1 is not r2, "maxsize=0 must not cache"
+    assert call_count == 2
+
+
+def test_decorator_maxsize_none_is_unbounded():
+    """The decorator honors maxsize=None — every distinct key is retained."""
+
+    @closing_lru_cache(maxsize=None)
+    def create(key):
+        return _Closeable(key)
+
+    objs = [create(i) for i in range(20)]
+    # Re-fetching any earlier key returns the same object — nothing was evicted.
+    for i, obj in enumerate(objs):
+        assert create(i) is obj

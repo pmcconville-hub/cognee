@@ -6,8 +6,7 @@ client in a separate process.
 
 from __future__ import annotations
 
-import tempfile
-
+from ._kuzu_helpers import install_json_extension_local
 from .harness import (
     DEFAULT_DISPATCH,
     HandleRegistry,
@@ -103,40 +102,9 @@ def _conn_execute_fetch_all(registry: HandleRegistry, req: Request):
 
 
 def _install_json(registry: HandleRegistry, req: Request) -> None:
-    """Run INSTALL JSON on a throwaway database so the extension is cached.
-    Matches the adapter's existing ``_install_json_extension`` behavior.
-    """
-    import kuzu
-
+    """Run INSTALL JSON on a throwaway database so the extension is cached."""
     buffer_pool_size = req.args[0] if req.args else 64 * 1024 * 1024
-
-    with tempfile.NamedTemporaryFile(mode="w", delete=True) as tmp:
-        temp_db_path = tmp.name
-        try:
-            tmp_db = kuzu.Database(
-                temp_db_path,
-                buffer_pool_size=buffer_pool_size,
-            )
-            tmp_db.init_database()
-            conn = kuzu.Connection(tmp_db)
-            try:
-                conn.execute("INSTALL JSON;")
-            except Exception:
-                # Already installed / unavailable — parity with the current
-                # adapter behavior, which also swallows this.
-                pass
-            finally:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-                try:
-                    tmp_db.close()
-                except Exception:
-                    pass
-        except Exception:
-            # Best-effort install; swallowing matches the current adapter.
-            pass
+    install_json_extension_local(buffer_pool_size)
     return None
 
 

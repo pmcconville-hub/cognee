@@ -35,6 +35,7 @@ from cognee_db_workers.harness import (
 OP_ECHO = 1
 OP_SLEEP = 2
 OP_RETURN_UNPICKLABLE = 3
+OP_SLEEP_PARAM = 4
 
 
 def _echo(registry, req):
@@ -44,6 +45,12 @@ def _echo(registry, req):
 def _sleep(registry, req):
     # Sleep forever — simulates a hung native call.
     time.sleep(60.0)
+    return None
+
+
+def _sleep_param(registry, req):
+    # Bounded sleep used by race-window tests. Caller sets the duration.
+    time.sleep(req.args[0])
     return None
 
 
@@ -59,6 +66,7 @@ def _return_unpicklable(registry, req):
 DISPATCH = {
     OP_ECHO: _echo,
     OP_SLEEP: _sleep,
+    OP_SLEEP_PARAM: _sleep_param,
     OP_RETURN_UNPICKLABLE: _return_unpicklable,
 }
 
@@ -454,3 +462,137 @@ async def test_lancedb_table_handle_release(tmp_path):
             _ = t.handle_id
     finally:
         session.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_lancedb_table_async_with_releases_handle(tmp_path):
+    """``async with table:`` must release the worker-side handle on exit.
+
+    Without a proper ``__aexit__``, the handle survives until GC runs and the
+    worker's HandleRegistry grows unboundedly across cognify cycles.
+    """
+    import pyarrow as pa
+
+    from cognee.infrastructure.databases.vector.lancedb.subprocess.proxy import (
+        LanceDBSubprocessSession,
+        RemoteLanceDBConnection,
+    )
+
+    session = LanceDBSubprocessSession.start()
+    try:
+        conn = RemoteLanceDBConnection(session, url=str(tmp_path / "lance"), api_key=None)
+        await conn.connect()
+        schema = pa.schema(
+            [("id", pa.string()), ("vector", pa.list_(pa.float32(), 4))]
+        )
+        async with await conn.create_table("t", schema=schema, exist_ok=True) as t:
+            assert t.handle_id is not None
+        # Block-exit must have released the handle.
+        with pytest.raises(RuntimeError, match="lancedb table handle released"):
+            _ = t.handle_id
+    finally:
+        session.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_lancedb_table_sync_with_releases_handle(tmp_path):
+    """Sync ``with table:`` must release the handle on exit, matching
+    upstream ``lancedb.AsyncTable.__exit__`` semantics. The proxy is
+    constructed via the async public API; the sync exit is what we test."""
+    import pyarrow as pa
+
+    from cognee.infrastructure.databases.vector.lancedb.subprocess.proxy import (
+        LanceDBSubprocessSession,
+        RemoteLanceDBConnection,
+    )
+
+    session = LanceDBSubprocessSession.start()
+    try:
+        conn = RemoteLanceDBConnection(session, url=str(tmp_path / "lance"), api_key=None)
+        await conn.connect()
+        schema = pa.schema(
+            [("id", pa.string()), ("vector", pa.list_(pa.float32(), 4))]
+        )
+        t = await conn.create_table("t", schema=schema, exist_ok=True)
+        with t:
+            assert t.handle_id is not None
+        with pytest.raises(RuntimeError, match="lancedb table handle released"):
+            _ = t.handle_id
+    finally:
+        session.shutdown()
+
+
+def test_concurrent_shutdown_with_inflight_call_does_not_hang():
+    """Stress: race ``shutdown()`` against an in-flight ``call()`` on the
+    same session.
+
+    Each iteration starts a fresh session, issues a slow
+    ``OP_SLEEP_PARAM`` on a background thread, then fires ``shutdown()``
+    while the caller is parked inside ``_resp_q.get()``.
+
+    Important caveat about what this test does and does not catch.
+    ``multiprocessing.Queue.get()`` holds an internal ``_rlock`` for the
+    duration of the receive, so the consumer that calls ``get()`` first
+    blocks any other consumer until it returns — they don't actually
+    race byte-for-byte for the next item. The narrow remaining race is
+    the window between the caller's ``_req_q.put`` and ``_resp_q.get``;
+    it's microseconds wide and OS scheduling typically favors the
+    already-parked caller. So in practice this test can't reliably
+    *reproduce* the protocol-corruption mode the reviewer described
+    against an unsynchronized ``shutdown()``.
+
+    What it does verify: shutdown and call interleave safely under
+    heavy contention — no thread hangs, every worker is reaped, no
+    spurious exceptions surface. That's a useful regression guard
+    against future ``shutdown()`` refactors that would, e.g., swallow
+    the in-flight caller's get and cause it to wait until its deadline.
+    """
+    import threading
+
+    n_iterations = 30
+    errors: list[BaseException] = []
+    errors_lock = threading.Lock()
+
+    for _ in range(n_iterations):
+        session = _start_session()
+
+        def caller(s=session):
+            try:
+                # Short sleep — wide enough to be parked in ``get()`` when
+                # the shutter arrives, but small enough to keep the test
+                # quick. ``timeout=1.0`` so a stolen response surfaces as
+                # ``TimeoutError`` within the iteration budget.
+                s.call(Request(op=OP_SLEEP_PARAM, args=(0.05,)), timeout=1.0)
+            except SubprocessTransportError:
+                pass  # acceptable: session was closed mid-flight
+            except TimeoutError:
+                with errors_lock:
+                    errors.append(
+                        TimeoutError("call() timed out — response likely stolen by shutter")
+                    )
+            except Exception as exc:
+                with errors_lock:
+                    errors.append(exc)
+
+        def shutter(s=session):
+            try:
+                s.shutdown(timeout=1.0)
+            except Exception as exc:
+                with errors_lock:
+                    errors.append(exc)
+
+        ct = threading.Thread(target=caller)
+        st = threading.Thread(target=shutter)
+        ct.start()
+        # Tiny delay to land the caller inside ``_resp_q.get()`` before
+        # ``shutdown()`` puts its SHUTDOWN sentinel — but small enough that
+        # the caller has not yet received a response.
+        time.sleep(0.01)
+        st.start()
+
+        ct.join(timeout=5.0)
+        st.join(timeout=5.0)
+        assert not ct.is_alive() and not st.is_alive(), "race produced a hang"
+        assert not session._proc.is_alive()
+
+    assert not errors, f"unexpected exceptions across {n_iterations} iterations: {errors!r}"

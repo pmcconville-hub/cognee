@@ -244,19 +244,23 @@ def _create_graph_engine(
                 # loudly here rather than letting the first JSON-touching
                 # query blow up with a confusing error inside the worker.
                 conn.load_extension("JSON")
+
+                # Adapter construction must stay inside the guard: with
+                # ``injected=True`` the ``__init__`` body runs schema
+                # bootstrap RPCs against the worker, which can raise. A
+                # raise outside this block would orphan the subprocess.
+                return KuzuAdapter(
+                    db_path=graph_file_path,
+                    kuzu_num_threads=kuzu_num_threads,
+                    kuzu_buffer_pool_size=kuzu_buffer_pool_size,
+                    kuzu_max_db_size=kuzu_max_db_size,
+                    database=db,
+                    connection=conn,
+                    session=session,
+                )
             except Exception:
                 session.shutdown(timeout=2.0)
                 raise
-
-            return KuzuAdapter(
-                db_path=graph_file_path,
-                kuzu_num_threads=kuzu_num_threads,
-                kuzu_buffer_pool_size=kuzu_buffer_pool_size,
-                kuzu_max_db_size=kuzu_max_db_size,
-                database=db,
-                connection=conn,
-                session=session,
-            )
 
         return KuzuAdapter(
             db_path=graph_file_path,

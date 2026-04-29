@@ -721,21 +721,57 @@ class SubprocessSession:
         flips ``_closed`` to True without reaping the child, and a second
         call would orphan a still-alive process holding file locks.
         Skip only the graceful SHUTDOWN sentinel when already closed.
+
+        ``timeout`` (or ``self._shutdown_timeout`` when ``None``) is the
+        *shutdown* budget — distinct from the per-call ``effective_timeout``
+        used by ``call`` / ``call_async``. A healthy in-flight RPC can run
+        for up to its own deadline (default 300s via
+        ``SUBPROCESS_CALL_TIMEOUT``), which is normally well above the
+        shutdown budget. When ``_rpc_lock`` is pinned by such an RPC
+        longer than ``t``, we skip the graceful sentinel and
+        force-terminate — shutdown is allowed to be aggressive about
+        reaping a worker even if it interrupts an otherwise healthy call.
+
+        Serializes the SHUTDOWN/ACK round trip against ``_rpc_lock`` so a
+        concurrent ``call`` / ``call_async`` can't consume the shutdown ACK
+        as its own response (and vice versa) — both paths read from the
+        same ``_resp_q`` and ``Queue.get()`` is atomic, so two competing
+        consumers race and one ends up with the wrong message. The lock
+        acquire is bounded by ``t``: if a hung RPC pins the lock for
+        longer than that, we fall through to ``_terminate`` without
+        sending the graceful sentinel. The kill chain in ``_terminate``
+        reaps the worker regardless of whether the worker cooperates,
+        and the in-flight RPC will surface a transport error from the
+        dead queues — which is the point of having a hard timeout.
         """
-        already_closed = self._closed
-        self._closed = True
         t = timeout if timeout is not None else self._shutdown_timeout
 
-        if not already_closed:
-            try:
-                if self._proc.is_alive():
+        acquired = self._rpc_lock.acquire(timeout=t)
+        try:
+            # Flip ``_closed`` under the lock when we got it so a concurrent
+            # ``shutdown()`` (or a fresh ``call``) sees the closed state and
+            # bails early. If we didn't acquire, set it anyway — better to
+            # block subsequent calls than to let them race the dying queues.
+            already_closed = self._closed
+            self._closed = True
+            if acquired and not already_closed and self._proc.is_alive():
+                try:
                     self._req_q.put(SHUTDOWN)
                     try:
                         self._resp_q.get(timeout=t)
                     except std_queue.Empty:
                         pass
-            except Exception:
-                pass
+                except Exception:
+                    pass
+        finally:
+            if acquired:
+                self._rpc_lock.release()
+        # ``_terminate`` runs outside ``_rpc_lock`` on purpose: holding the
+        # lock through ``join``/``terminate``/``kill`` could pin it for
+        # seconds, and any caller that acquires the lock next would put on
+        # a dead queue and hang. ``_check_alive`` (which all calls go
+        # through under the lock) reads ``_closed`` and bails first, so a
+        # post-terminate caller never reaches the queue ops.
         self._terminate(timeout=t)
 
         # Break the ref cycle: each ReplayStep's ``make_request`` is a
