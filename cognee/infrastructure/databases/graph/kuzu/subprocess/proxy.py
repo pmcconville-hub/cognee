@@ -142,6 +142,13 @@ class RemoteKuzuDatabase:
 
     def _apply_new_db_handle(self, new_hid: int) -> Optional[int]:
         old = self._handle_id
+        if old is None:
+            # Defense-in-depth mirror of the LanceDB ``_apply_new_handle``
+            # guard. The current ``close()`` ordering (deregister → call →
+            # clear in finally) avoids the race today, but anyone changing
+            # that ordering shouldn't silently regress to resurrecting a
+            # closed proxy.
+            return None
         self._handle_id = new_hid
         return old
 
@@ -218,6 +225,9 @@ class RemoteKuzuConnection:
 
     def _apply_new_conn_handle(self, new_hid: int) -> Optional[int]:
         old = self._handle_id
+        if old is None:
+            # See ``_apply_new_db_handle`` for the rationale — same guard.
+            return None
         self._handle_id = new_hid
         return old
 

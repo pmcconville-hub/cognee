@@ -463,6 +463,38 @@ async def test_lancedb_table_handle_release(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_lancedb_table_apply_new_handle_after_release_does_not_resurrect(tmp_path):
+    """Race-window guard: if ``_respawn`` snapshotted ``_replay_steps`` before
+    ``release()`` deregistered ours, the snapshot will replay our OPEN_TABLE
+    step and fire ``_apply_new_handle`` on a proxy whose ``_handle_id`` is
+    already ``None``. The callback must not write the new id back —
+    otherwise the released table is silently resurrected.
+    """
+    import pyarrow as pa
+
+    from cognee.infrastructure.databases.vector.lancedb.subprocess.proxy import (
+        LanceDBSubprocessSession,
+        RemoteLanceDBConnection,
+    )
+
+    session = LanceDBSubprocessSession.start()
+    try:
+        conn = RemoteLanceDBConnection(session, url=str(tmp_path / "lance"), api_key=None)
+        await conn.connect()
+        schema = pa.schema([("id", pa.string()), ("vector", pa.list_(pa.float32(), 4))])
+        t = await conn.create_table("t", schema=schema, exist_ok=True)
+        await t.release()
+        assert t._handle_id is None
+
+        # Simulate the racing replay: callback fires with a fresh handle id.
+        result = t._apply_new_handle(99999)
+        assert result is None, "released proxy must not register a remap entry"
+        assert t._handle_id is None, "released proxy must not be resurrected"
+    finally:
+        session.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_lancedb_table_async_with_releases_handle(tmp_path):
     """``async with table:`` must release the worker-side handle on exit.
 

@@ -93,6 +93,38 @@ def test_remote_kuzu_connection_close_deregisters_replay_steps(tmp_path):
         session.shutdown()
 
 
+def test_apply_new_db_handle_after_close_does_not_resurrect(tmp_path):
+    """Defensive guard: even though the current ``close()`` ordering
+    (deregister → call → clear) prevents the racing-replay scenario for
+    Kuzu, the callback should still no-op when ``_handle_id`` is None
+    so a future refactor can't silently regress to resurrection.
+    """
+    session, db = _start_proxy(tmp_path)
+    try:
+        db.close()
+        assert db._handle_id is None
+        result = db._apply_new_db_handle(99999)
+        assert result is None
+        assert db._handle_id is None
+    finally:
+        session.shutdown()
+
+
+def test_apply_new_conn_handle_after_close_does_not_resurrect(tmp_path):
+    """Same guard, mirrored on ``RemoteKuzuConnection``."""
+    session, db = _start_proxy(tmp_path)
+    try:
+        db.init_database()
+        conn = RemoteKuzuConnection(session, db)
+        conn.close()
+        assert conn._handle_id is None
+        result = conn._apply_new_conn_handle(99999)
+        assert result is None
+        assert conn._handle_id is None
+    finally:
+        session.shutdown()
+
+
 def test_post_close_respawn_does_not_resurrect_handle(tmp_path):
     """The systemic regression we're guarding against: after ``close()``,
     a respawn must NOT replay the closed proxy's OPEN step. We simulate

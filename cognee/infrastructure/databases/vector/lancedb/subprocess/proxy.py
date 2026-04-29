@@ -172,6 +172,17 @@ class RemoteLanceDBTable:
         has already been released (no remap needed in that case).
         """
         old = self._handle_id
+        if old is None:
+            # Race window: ``release()`` cleared ``_handle_id`` and
+            # deregistered our step (without ``_rpc_lock``) AFTER
+            # ``_respawn`` already snapshotted ``_replay_steps``. Without
+            # this guard, ``self._handle_id = new_handle_id`` would
+            # resurrect a table the user already released. The new
+            # worker-side handle that replay created is orphaned (one
+            # leaked handle per race occurrence, bounded by respawn
+            # count); freeing it would require session-level cleanup
+            # which is out of scope here.
+            return None
         self._handle_id = new_handle_id
         return old
 
