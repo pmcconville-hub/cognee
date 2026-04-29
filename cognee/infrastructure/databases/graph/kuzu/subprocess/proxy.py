@@ -122,6 +122,11 @@ class RemoteKuzuDatabase:
             max_db_size=max_db_size,
         )
         self._initialized = False
+        # Tracks replay steps THIS proxy registered with the session, so
+        # ``close()`` can deregister them. Without this, a worker respawn
+        # after ``close()`` would replay the OPEN step and silently
+        # resurrect a handle the user already closed.
+        self._replay_steps: list[ReplayStep] = []
         self._open()
         self._register_replay()
 
@@ -142,12 +147,12 @@ class RemoteKuzuDatabase:
 
     def _register_replay(self) -> None:
         """Re-open the database with the same kwargs after a respawn."""
-        self._session.add_replay_step(
-            ReplayStep(
-                make_request=lambda: Request(op=OP_OPEN_DATABASE, kwargs=self._open_kwargs),
-                apply_new_handle=self._apply_new_db_handle,
-            )
+        step = ReplayStep(
+            make_request=lambda: Request(op=OP_OPEN_DATABASE, kwargs=self._open_kwargs),
+            apply_new_handle=self._apply_new_db_handle,
         )
+        self._session.add_replay_step(step)
+        self._replay_steps.append(step)
 
     def init_database(self) -> None:
         # Use the validated property so a use-after-close fails locally with
@@ -158,15 +163,23 @@ class RemoteKuzuDatabase:
         self._initialized = True
         # After the first init, replay it too — lambda reads the current
         # (possibly remapped) handle_id at replay time.
-        self._session.add_replay_step(
-            ReplayStep(
-                make_request=lambda: Request(op=OP_DB_INIT, handle_id=self._handle_id),
-            )
+        step = ReplayStep(
+            make_request=lambda: Request(op=OP_DB_INIT, handle_id=self._handle_id),
         )
+        self._session.add_replay_step(step)
+        self._replay_steps.append(step)
 
     def close(self) -> None:
         if self._handle_id is None:
             return
+        # Deregister BEFORE the close call: if the worker dies between
+        # here and ``OP_DB_CLOSE`` returning, the next ``_respawn`` must
+        # NOT replay the OPEN step and resurrect a handle the user just
+        # closed. Doing it after the close would also work for the
+        # happy path, but only deregister-first is race-safe.
+        for step in self._replay_steps:
+            self._session.remove_replay_step(step)
+        self._replay_steps.clear()
         try:
             self._session.call(Request(op=OP_DB_CLOSE, handle_id=self._handle_id))
         finally:
@@ -190,6 +203,11 @@ class RemoteKuzuConnection:
             Request(op=OP_OPEN_CONNECTION, args=(database.handle_id,))
         )
         self._handle_id: Optional[int] = resp.new_handle_id
+        # Tracks replay steps THIS proxy registered (one for the
+        # connection itself + one per loaded extension). ``close()``
+        # deregisters them all so a post-close respawn doesn't reopen a
+        # connection the user already discarded.
+        self._replay_steps: list[ReplayStep] = []
         self._register_replay()
 
     @property
@@ -204,14 +222,14 @@ class RemoteKuzuConnection:
         return old
 
     def _register_replay(self) -> None:
-        self._session.add_replay_step(
-            ReplayStep(
-                make_request=lambda: Request(
-                    op=OP_OPEN_CONNECTION, args=(self._database.handle_id,)
-                ),
-                apply_new_handle=self._apply_new_conn_handle,
-            )
+        step = ReplayStep(
+            make_request=lambda: Request(
+                op=OP_OPEN_CONNECTION, args=(self._database.handle_id,)
+            ),
+            apply_new_handle=self._apply_new_conn_handle,
         )
+        self._session.add_replay_step(step)
+        self._replay_steps.append(step)
 
     def execute(self, query: str, params: Optional[Dict[str, Any]] = None) -> _Materialized:
         """Execute a query; return a ``QueryResult``-like iterator of fully
@@ -235,19 +253,26 @@ class RemoteKuzuConnection:
             Request(op=OP_LOAD_EXTENSION, handle_id=self.handle_id, args=(name,))
         )
         # Replay the same extension load on any fresh connection.
-        self._session.add_replay_step(
-            ReplayStep(
-                make_request=lambda name=name: Request(
-                    op=OP_LOAD_EXTENSION,
-                    handle_id=self._handle_id,
-                    args=(name,),
-                ),
-            )
+        step = ReplayStep(
+            make_request=lambda name=name: Request(
+                op=OP_LOAD_EXTENSION,
+                handle_id=self._handle_id,
+                args=(name,),
+            ),
         )
+        self._session.add_replay_step(step)
+        self._replay_steps.append(step)
 
     def close(self) -> None:
         if self._handle_id is None:
             return
+        # Deregister replay steps BEFORE the close call so a worker
+        # respawn between here and ``OP_CONN_CLOSE`` returning can't
+        # replay the OPEN_CONNECTION / LOAD_EXTENSION steps and
+        # resurrect a connection the user already closed.
+        for step in self._replay_steps:
+            self._session.remove_replay_step(step)
+        self._replay_steps.clear()
         try:
             self._session.call(Request(op=OP_CONN_CLOSE, handle_id=self._handle_id))
         finally:
