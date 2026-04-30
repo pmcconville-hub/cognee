@@ -96,6 +96,15 @@ def create_graph_engine(
     graph_database_port = normalized_optional_params["graph_database_port"]
     graph_database_key = normalized_optional_params["graph_database_key"]
     graph_dataset_database_handler = normalized_optional_params["graph_dataset_database_handler"]
+    # The Kuzu/subprocess params also went through ``_normalize_optional_*``;
+    # reassign so callers passing ``None`` see the function-default applied
+    # (otherwise ``None`` would flow into the cache key and the factory).
+    graph_database_subprocess_enabled = normalized_optional_params[
+        "graph_database_subprocess_enabled"
+    ]
+    kuzu_num_threads = normalized_optional_params["kuzu_num_threads"]
+    kuzu_buffer_pool_size = normalized_optional_params["kuzu_buffer_pool_size"]
+    kuzu_max_db_size = normalized_optional_params["kuzu_max_db_size"]
 
     # Check USE_UNIFIED_PROVIDER outside the cache so it's always re-read
     unified_provider = os.environ.get("USE_UNIFIED_PROVIDER", "")
