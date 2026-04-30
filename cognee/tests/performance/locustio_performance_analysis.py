@@ -21,6 +21,7 @@ Environment variables:
     COGNEE_API_KEY          - API key for authentication (required)
 """
 
+import csv
 import io
 import os
 import random
@@ -32,6 +33,19 @@ from locust import HttpUser, SequentialTaskSet, between, events, tag, task
 
 API_KEY = os.environ.get("COGNEE_API_KEY", "")
 SEARCH_TYPE = os.environ.get("COGNEE_SEARCH_TYPE", "GRAPH_COMPLETION")
+
+ENDPOINT_NAMES = ("/api/v1/add", "/api/v1/cognify", "/api/v1/search")
+
+
+def read_endpoint_averages(stats_csv_path: Path) -> dict[str, float]:
+    """Parse a locust ``_stats.csv`` and return ``{endpoint_name: avg_ms}``."""
+    averages: dict[str, float] = {}
+    with stats_csv_path.open(newline="") as f:
+        for row in csv.DictReader(f):
+            if row["Name"] in ENDPOINT_NAMES:
+                averages[row["Name"]] = float(row["Average Response Time"])
+    return averages
+
 
 TOPICS = [
     "quantum computing",
@@ -291,28 +305,39 @@ class SingleDatasetCogneeTest(HttpUser):
 
 
 if __name__ == "__main__":
-    import asyncio
+    import signal
     import subprocess
     import sys
+    import tempfile
     import time
     import urllib.error
     import urllib.request
 
-    import cognee
-    from cognee.modules.users.api_key.create_api_key import create_api_key
-    from cognee.modules.users.methods import create_default_user
+    # Importing locust at module top monkey-patches socket/time via gevent, which
+    # makes asyncio + async sqlite hot-spin at 100% CPU. Run bootstrap in a fresh
+    # interpreter that never imports locust.
+    BOOTSTRAP_SCRIPT = """
+import asyncio
+import sys
 
-    async def bootstrap() -> str:
-        await cognee.prune.prune_data()
-        await cognee.prune.prune_system(metadata=True)
+import cognee
+from cognee.modules.engine.operations.setup import setup
+from cognee.modules.users.api_key.create_api_key import create_api_key
+from cognee.modules.users.methods import create_default_user
 
-        from cognee.modules.engine.operations.setup import setup
 
-        await setup()
+async def main(out_path: str) -> None:
+    await cognee.prune.prune_data()
+    await cognee.prune.prune_system(metadata=True)
+    await setup()
+    user = await create_default_user()
+    api_key_obj = await create_api_key(user, name='locust-loadtest')
+    with open(out_path, 'w') as f:
+        f.write(api_key_obj.api_key)
 
-        user = await create_default_user()
-        api_key_obj = await create_api_key(user, name="locust-loadtest")
-        return api_key_obj.api_key
+
+asyncio.run(main(sys.argv[1]))
+"""
 
     def wait_for_server(url: str, timeout: float = 240.0) -> None:
         deadline = time.time() + timeout
@@ -326,14 +351,28 @@ if __name__ == "__main__":
             time.sleep(0.5)
         raise SystemExit(f"Cognee server at {url} did not become ready in {timeout}s")
 
-    api_key = asyncio.run(bootstrap())
+    key_path = tempfile.NamedTemporaryFile(suffix=".key", delete=False).name
+    try:
+        subprocess.run(
+            [sys.executable, "-c", BOOTSTRAP_SCRIPT, key_path],
+            check=True,
+        )
+        api_key = Path(key_path).read_text().strip()
+    finally:
+        try:
+            os.unlink(key_path)
+        except FileNotFoundError:
+            pass
 
     host = os.environ.get("HTTP_API_HOST", "localhost")
     port = os.environ.get("HTTP_API_PORT", "8000")
     base_url = f"http://{host}:{port}"
 
     server_proc = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "cognee.api.client:app", "--host", host, "--port", port]
+        [sys.executable, "-m", "uvicorn", "cognee.api.client:app", "--host", host, "--port", port],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
     )
     try:
         wait_for_server(f"{base_url}/health")
@@ -370,15 +409,34 @@ if __name__ == "__main__":
             "-r",
             "1",
             "--run-time",
-            "5m",
+            "5min",
             *sys.argv[1:],
         ]
 
         rc = subprocess.run(cmd, env=env).returncode
     finally:
-        server_proc.terminate()
         try:
+            os.killpg(server_proc.pid, signal.SIGTERM)
             server_proc.wait(timeout=10)
+        except ProcessLookupError:
+            pass
         except subprocess.TimeoutExpired:
-            server_proc.kill()
+            try:
+                os.killpg(server_proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+    stats_csv = Path(f"{result_location}_stats.csv")
+    if stats_csv.exists():
+        averages = read_endpoint_averages(stats_csv)
+        print("\n=== Average response times (ms) ===")
+        for name in ENDPOINT_NAMES:
+            avg = averages.get(name)
+            if avg is None:
+                print(f"  {name}: (no requests recorded)")
+            else:
+                print(f"  {name}: {avg:.0f} ms")
+    else:
+        print(f"\nNo stats CSV found at {stats_csv}; skipping averages.")
+
     sys.exit(rc)
