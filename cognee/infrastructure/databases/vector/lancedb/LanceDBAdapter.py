@@ -187,8 +187,13 @@ class LanceDBAdapter(VectorDBInterface):
                         self.connection = None
                         self._permanently_closed = True
                     if session is not None:
+                        # ``session.shutdown()`` is sync and can block for
+                        # seconds (join → terminate → kill chain plus a
+                        # bounded ``_rpc_lock`` acquire). Offload to a
+                        # worker thread so we don't freeze the event loop
+                        # during cleanup.
                         try:
-                            session.shutdown()
+                            await asyncio.to_thread(session.shutdown)
                         except Exception as teardown_err:
                             logger.warning(
                                 "Error shutting down LanceDB subprocess after "
@@ -997,7 +1002,10 @@ class LanceDBAdapter(VectorDBInterface):
             except Exception as e:
                 logger.warning("Error closing LanceDB connection: %s", e)
         if session is not None:
+            # ``session.shutdown()`` is sync and joins/terminates/kills the
+            # worker process — can take seconds. Offload to a worker thread
+            # so awaiting ``close()`` doesn't freeze the calling event loop.
             try:
-                session.shutdown()
+                await asyncio.to_thread(session.shutdown)
             except Exception as e:
                 logger.warning("Error shutting down LanceDB subprocess: %s", e)

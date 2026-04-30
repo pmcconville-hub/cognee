@@ -143,3 +143,61 @@ async def test_concurrent_first_get_connection_returns_same_object(monkeypatch, 
     assert adapter.connection is c1
 
     await adapter.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not HAS_LANCEDB, reason="lancedb not installed")
+async def test_close_does_not_block_event_loop(monkeypatch, tmp_path):
+    """``close()`` must not freeze the event loop while
+    ``session.shutdown()`` (sync, can take seconds) runs. We simulate a
+    slow shutdown and assert other coroutines on the same loop continue
+    to make progress while ``close()`` is awaiting it.
+    """
+    import time as _time
+
+    # A fake session whose shutdown blocks for ~150 ms. If
+    # ``close()`` calls it directly (not via ``asyncio.to_thread``), the
+    # event loop is frozen for the duration and our heartbeat coroutine
+    # below will record fewer than ~10 ticks of a 10 ms loop.
+    class _SlowSession:
+        def __init__(self):
+            self.shutdown_called = False
+
+        def shutdown(self, *args, **kwargs):
+            _time.sleep(0.15)
+            self.shutdown_called = True
+
+    fake_session = _SlowSession()
+    fake_conn = object()  # placeholder; subprocess mode skips connection.close()
+
+    adapter = LanceDBAdapter(
+        url=str(tmp_path / "lance_db"),
+        api_key=None,
+        embedding_engine=_FakeEmbeddingEngine(),
+        connection=fake_conn,
+        session=fake_session,
+    )
+
+    ticks = 0
+    stop = asyncio.Event()
+
+    async def heartbeat():
+        nonlocal ticks
+        while not stop.is_set():
+            ticks += 1
+            await asyncio.sleep(0.01)
+
+    hb_task = asyncio.create_task(heartbeat())
+    try:
+        await adapter.close()
+    finally:
+        stop.set()
+        await hb_task
+
+    assert fake_session.shutdown_called is True
+    # Without ``asyncio.to_thread``, ticks would be ≤2 (only the ones
+    # before ``close()`` and after it returned). With the offload, we
+    # should see at least ~5 ticks during the 150 ms shutdown window.
+    assert ticks >= 5, (
+        f"event loop appears blocked: only {ticks} heartbeats during a 150ms shutdown"
+    )

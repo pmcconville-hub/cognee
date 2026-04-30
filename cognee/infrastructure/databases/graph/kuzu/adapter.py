@@ -3,6 +3,7 @@
 import os
 import json
 import asyncio
+import threading
 import tempfile
 from uuid import UUID, uuid5, NAMESPACE_OID
 from kuzu import Connection
@@ -130,6 +131,15 @@ class KuzuAdapter(GraphDBInterface):
         # this — see ``close()``'s docstring for the cross-loop reason.
         self._all_queries_drained = asyncio.Event()
         self._all_queries_drained.set()
+        # Brief sync lock for atomic counter+event mutations. Cannot reuse
+        # ``_connection_lock`` here: teardown holds that lock across the
+        # ``await`` on ``_all_queries_drained``, and the query's finally
+        # needs to decrement+set under SOME lock to make those mutations
+        # atomic relative to other queries' increment+clear. If the same
+        # lock were reused, the finally would deadlock waiting for
+        # teardown to release it. ``threading.Lock`` is held for
+        # microseconds (no awaits inside) so it can't deadlock the loop.
+        self._counter_lock = threading.Lock()
 
     def _ensure_schema(self) -> None:
         """Create Node + EDGE tables on the current ``self.connection``.
@@ -360,20 +370,27 @@ class KuzuAdapter(GraphDBInterface):
                         # Increment under ``_connection_lock`` so a transient
                         # teardown waiting in ``_drain_in_flight_queries``
                         # can't see ``open_connections == 0`` between the
-                        # lock release and our increment.
+                        # lock release and our increment. The counter+event
+                        # mutation itself uses ``_counter_lock`` so it stays
+                        # atomic against other queries' decrement+set.
                         async with self._connection_lock:
                             connection = self.get_or_init_connection()
-                            self.open_connections += 1
-                            self._all_queries_drained.clear()
+                            with self._counter_lock:
+                                self.open_connections += 1
+                                self._all_queries_drained.clear()
                         logger.info(f"Open connections after open: {self.open_connections}")
                         try:
                             result = await loop.run_in_executor(
                                 self.executor, blocking_query, connection
                             )
                         finally:
-                            self.open_connections -= 1
-                            if self.open_connections == 0:
-                                self._all_queries_drained.set()
+                            # Decrement under ``_counter_lock`` (not
+                            # ``_connection_lock`` — teardown holds the
+                            # latter across its ``await`` and we'd deadlock).
+                            with self._counter_lock:
+                                self.open_connections -= 1
+                                if self.open_connections == 0:
+                                    self._all_queries_drained.set()
                             logger.info(
                                 f"Open connections after close: {self.open_connections}"
                             )
@@ -394,19 +411,27 @@ class KuzuAdapter(GraphDBInterface):
                     # Hold _connection_lock only for init + counter bookkeeping;
                     # the actual query runs unlocked so multiple queries can
                     # execute concurrently. Counter increment must be inside
-                    # the lock so ``_drain_in_flight_queries`` can't miss us.
+                    # ``_connection_lock`` so ``_drain_in_flight_queries``
+                    # can't miss us, AND inside ``_counter_lock`` so the
+                    # increment+clear is atomic against other queries'
+                    # decrement+set in their ``finally``.
                     async with self._connection_lock:
                         connection = self.get_or_init_connection()
-                        self.open_connections += 1
-                        self._all_queries_drained.clear()
+                        with self._counter_lock:
+                            self.open_connections += 1
+                            self._all_queries_drained.clear()
                     try:
                         result = await loop.run_in_executor(
                             self.executor, blocking_query, connection
                         )
                     finally:
-                        self.open_connections -= 1
-                        if self.open_connections == 0:
-                            self._all_queries_drained.set()
+                        # Decrement under ``_counter_lock`` (not
+                        # ``_connection_lock`` — teardown holds the latter
+                        # across its ``await`` and we'd deadlock).
+                        with self._counter_lock:
+                            self.open_connections -= 1
+                            if self.open_connections == 0:
+                                self._all_queries_drained.set()
 
                 otel_span.set_attribute(COGNEE_DB_ROW_COUNT, len(result))
                 return result
@@ -470,8 +495,16 @@ class KuzuAdapter(GraphDBInterface):
         doesn't tear out a connection an executor thread is still using.
         ``close()`` does NOT use this — see its docstring for why
         (cross-loop ``asyncio.Event.wait()`` would raise).
+
+        Reads the counter under ``_counter_lock`` so a stale ``set()``
+        from a finishing query can't race a fresh increment from a new
+        one and trick us into busy-spinning on an event that's set while
+        ``open_connections > 0``.
         """
-        while self.open_connections > 0:
+        while True:
+            with self._counter_lock:
+                if self.open_connections == 0:
+                    return
             await self._all_queries_drained.wait()
 
     async def close(self):
@@ -498,13 +531,21 @@ class KuzuAdapter(GraphDBInterface):
         from a foreign loop — ``executor.shutdown(wait=True)`` is the
         cross-loop equivalent and the only correct choice here.
         """
+        # Both ``executor.shutdown(wait=True)`` and
+        # ``SubprocessSession.shutdown()`` are sync-blocking calls that can
+        # take seconds (executor: thread join; session: join/terminate/kill
+        # chain plus a bounded ``_rpc_lock`` acquire). Offload them to a
+        # worker thread so awaiting ``close()`` doesn't freeze the calling
+        # event loop. ``asyncio.to_thread`` is safe across loops — required
+        # because ``close()`` may be invoked from a foreign loop via
+        # ``closing_lru_cache._close_value`` running ``asyncio.run``.
         executor = getattr(self, "executor", None)
         if executor is not None:
-            executor.shutdown(wait=True)
+            await asyncio.to_thread(executor.shutdown, True)
         self._drop_native_resources()
         if self._session is not None:
             try:
-                self._session.shutdown()
+                await asyncio.to_thread(self._session.shutdown)
             except Exception as e:
                 logger.warning(f"Error shutting down Kuzu subprocess: {e}")
             self._session = None
