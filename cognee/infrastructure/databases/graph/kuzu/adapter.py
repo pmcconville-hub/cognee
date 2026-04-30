@@ -2414,6 +2414,17 @@ class KuzuAdapter(GraphDBInterface):
         This method deletes all nodes and relationships from the graph database.
         It raises exceptions for failures occurring during deletion processes.
         """
+        # In ``shared_kuzu_lock`` mode the Redis lock is the cross-process
+        # mutex that ``query()`` uses to keep two processes from opening
+        # the same Kuzu DB on disk concurrently. ``delete_graph`` removes
+        # those files, so it MUST hold the same lock — otherwise a peer
+        # process could be mid-query (holding the on-disk file lock) when
+        # we delete its files, or could open the DB right between our
+        # drop and our reopen.
+        held_redis_lock = False
+        if cache_config.shared_kuzu_lock and self.redis_lock is not None:
+            await asyncio.to_thread(self.redis_lock.acquire_lock)
+            held_redis_lock = True
         try:
             # Transient drop: release the file handles so we can delete the
             # db files, but do NOT latch ``_permanently_closed`` — callers
@@ -2460,6 +2471,11 @@ class KuzuAdapter(GraphDBInterface):
         except Exception as e:
             logger.error(f"Failed to delete graph data: {e}")
             raise
+        finally:
+            if held_redis_lock:
+                # Offloaded for symmetry with the acquire path; release
+                # does Redis I/O too.
+                await asyncio.to_thread(self.redis_lock.release_lock)
 
     async def get_document_subgraph(self, data_id: str):
         """
