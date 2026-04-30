@@ -26,6 +26,8 @@ import os
 import random
 import uuid
 
+from pathlib import Path
+from datetime import datetime
 from locust import HttpUser, SequentialTaskSet, between, events, tag, task
 
 API_KEY = os.environ.get("COGNEE_API_KEY", "")
@@ -292,12 +294,17 @@ if __name__ == "__main__":
     import urllib.request
 
     import cognee
-    from cognee.modules.users.api_key import create_api_key
+    from cognee.modules.users.api_key.create_api_key import create_api_key
     from cognee.modules.users.methods import create_default_user
 
     async def bootstrap() -> str:
         await cognee.prune.prune_data()
         await cognee.prune.prune_system(metadata=True)
+
+        from cognee.modules.engine.operations.setup import setup
+
+        await setup()
+
         user = await create_default_user()
         api_key_obj = await create_api_key(user, name="locust-loadtest")
         return api_key_obj.api_key
@@ -326,7 +333,35 @@ if __name__ == "__main__":
     try:
         wait_for_server(f"{base_url}/health")
         env = {**os.environ, "COGNEE_API_KEY": api_key}
-        cmd = ["locust", "-f", __file__, "--host", base_url, *sys.argv[1:]]
+        # Timestamped results to avoid overwriting previous runs and for easier identification of test runs.
+        now = datetime.now()
+        timestamp = now.strftime("%Y%m%d_%H%M%S")
+        # Results will be saved in the `results` directory with a unique name based on the timestamp of the test run.
+        result_folder = Path("results")
+        result_folder.mkdir(exist_ok=True)
+        result_location = result_folder / f"locust_run_{timestamp}"
+        html_result_location = f"{result_location}.html"
+        locust_log_location = Path(f"{result_location}.log")
+        locust_log_location.touch()
+
+        # Run locust command
+        cmd = [
+            "locust",
+            "-f",
+            __file__,
+            "--host",
+            base_url,
+            "--csv",
+            result_location,
+            "--html",
+            html_result_location,
+            "--logfile",
+            locust_log_location,
+            "--run-time",
+            "5m",
+            *sys.argv[1:],
+        ]
+
         rc = subprocess.run(cmd, env=env).returncode
     finally:
         server_proc.terminate()
