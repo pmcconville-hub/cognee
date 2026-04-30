@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import threading
 from os import path
 from uuid import UUID
 from enum import Enum
@@ -115,6 +116,17 @@ class LanceDBAdapter(VectorDBInterface):
         self.api_key = api_key
         self.embedding_engine = embedding_engine
         self.VECTOR_DB_LOCK = asyncio.Lock()
+        # Guards lifecycle state — the ``connection``, ``_session`` and
+        # ``_permanently_closed`` triple must be observed/mutated atomically
+        # so a concurrent ``close()`` can't be silently overwritten by an
+        # in-flight ``get_connection()`` resuming after its ``await``.
+        # ``threading.Lock`` (not ``asyncio.Lock``) for cross-loop safety:
+        # ``close()`` can be invoked from a foreign event loop via
+        # ``closing_lru_cache._close_value`` running ``asyncio.run``, and
+        # awaiting an asyncio.Lock there raises "got Future attached to a
+        # different loop". The lock is held for microseconds at a time and
+        # never wraps an ``await``, so it can't deadlock the event loop.
+        self._lifecycle_lock = threading.Lock()
         self.connection = connection
         self._session = session
         # True iff this adapter was constructed in subprocess-proxy mode.
@@ -137,43 +149,82 @@ class LanceDBAdapter(VectorDBInterface):
 
         A subprocess-mode adapter that has been closed is an error state —
         we refuse to silently fall through to a local lancedb connection.
+
+        Race-safe under concurrent ``close()`` via ``_lifecycle_lock``: any
+        connection created during an ``await`` is committed (or discarded)
+        only after a re-check of the closed flag, so a closed adapter can
+        never silently start handing out fresh connections again.
         """
-        if self._permanently_closed:
-            raise RuntimeError(
-                "LanceDBAdapter is closed; a new adapter must be created "
-                "(subprocess-mode adapters cannot be re-initialized)."
-            )
-        if self.connection is None:
-            if self._subprocess_mode:
+        # Atomic state snapshot — no awaits inside the lock.
+        with self._lifecycle_lock:
+            if self._permanently_closed:
+                raise RuntimeError(
+                    "LanceDBAdapter is closed; a new adapter must be created "
+                    "(subprocess-mode adapters cannot be re-initialized)."
+                )
+            existing = self.connection
+            if existing is None and self._subprocess_mode:
                 raise RuntimeError(
                     "LanceDBAdapter subprocess session is gone; adapter cannot "
                     "be re-initialized in local mode."
                 )
-            self.connection = await lancedb.connect_async(self.url, api_key=self.api_key)
-        else:
+
+        if existing is not None:
             # Remote connection lazily opens its own underlying lancedb handle.
             # If the first connect fails (bad URL, auth, network) the session
             # stays alive and never gets used — tear it down immediately so a
             # retry doesn't leak an orphan worker process for each failed
-            # attempt.
-            ensure = getattr(self.connection, "_ensure_connected", None)
+            # attempt. Mutate state under the lock so a concurrent ``close()``
+            # observes a coherent (closed, no-session) view.
+            ensure = getattr(existing, "_ensure_connected", None)
             if ensure is not None:
                 try:
                     await ensure()
                 except Exception:
-                    if self._session is not None:
+                    with self._lifecycle_lock:
+                        session = self._session
+                        self._session = None
+                        self.connection = None
+                        self._permanently_closed = True
+                    if session is not None:
                         try:
-                            self._session.shutdown()
+                            session.shutdown()
                         except Exception as teardown_err:
                             logger.warning(
                                 "Error shutting down LanceDB subprocess after "
                                 "connect failure: %s",
                                 teardown_err,
                             )
-                        self._session = None
-                    self.connection = None
-                    self._permanently_closed = True
                     raise
+            return existing
+
+        # Local mode, lazy: create the connection outside the lock (the
+        # await would otherwise block any concurrent observer), then
+        # commit under the lock with a re-check. A concurrent ``close()``
+        # that ran during our await must NOT be silently overwritten —
+        # we discard the new connection and raise instead.
+        new_conn = await lancedb.connect_async(self.url, api_key=self.api_key)
+        stale = None
+        with self._lifecycle_lock:
+            if self._permanently_closed:
+                stale = new_conn
+            elif self.connection is not None:
+                # Lost the race — another caller already committed. Discard ours.
+                stale = new_conn
+            else:
+                self.connection = new_conn
+                return new_conn
+
+        # Discard the throwaway outside the lock — its close is async.
+        try:
+            await stale.close()
+        except Exception:
+            pass
+        if self._permanently_closed:
+            raise RuntimeError(
+                "LanceDBAdapter is closed; a new adapter must be created "
+                "(subprocess-mode adapters cannot be re-initialized)."
+            )
         return self.connection
 
     # ------------------------------------------------------------------
@@ -918,13 +969,35 @@ class LanceDBAdapter(VectorDBInterface):
 
     async def close(self):
         """Release the underlying connection and, in subprocess mode, tear down
-        the worker process. Once closed the adapter is not reusable.
+        the worker process. Once closed the adapter is not reusable. Idempotent.
+
+        Snapshot lifecycle state atomically under ``_lifecycle_lock``, then
+        do the slow teardown (``connection.close()`` is async, ``session.shutdown()``
+        can take seconds) outside the lock. The flag is flipped first so a
+        concurrent ``get_connection`` that reads the snapshot sees the
+        closed state immediately — no new connections after this point.
         """
-        self.connection = None
-        if self._session is not None:
+        with self._lifecycle_lock:
+            if self._permanently_closed:
+                return  # idempotent
+            self._permanently_closed = True
+            connection = self.connection
+            session = self._session
+            self.connection = None
+            self._session = None
+
+        # Local-mode connection.close() releases the underlying LanceDB
+        # native handles. In subprocess mode the connection is a thin
+        # proxy whose lifecycle is owned by ``session.shutdown()`` —
+        # closing it separately would just bounce more RPCs to a worker
+        # we're about to kill.
+        if connection is not None and not self._subprocess_mode:
             try:
-                self._session.shutdown()
+                await connection.close()
+            except Exception as e:
+                logger.warning("Error closing LanceDB connection: %s", e)
+        if session is not None:
+            try:
+                session.shutdown()
             except Exception as e:
                 logger.warning("Error shutting down LanceDB subprocess: %s", e)
-            self._session = None
-        self._permanently_closed = True
