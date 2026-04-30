@@ -213,6 +213,16 @@ class LanceDBAdapter(VectorDBInterface):
                                 teardown_err,
                             )
                     raise
+            # Re-check the closed flag after the await — a concurrent
+            # ``close()`` could have run while we were inside
+            # ``_ensure_connected``, in which case we must not return
+            # the (now-defunct) proxy.
+            with self._lifecycle_lock:
+                if self._permanently_closed:
+                    raise RuntimeError(
+                        "LanceDBAdapter is closed; a new adapter must be created "
+                        "(subprocess-mode adapters cannot be re-initialized)."
+                    )
             return existing
 
         # Local mode, lazy: create the connection outside the lock (the
@@ -222,12 +232,19 @@ class LanceDBAdapter(VectorDBInterface):
         # we discard the new connection and raise instead.
         new_conn = await lancedb.connect_async(self.url, api_key=self.api_key)
         stale = None
+        # Capture the *winning* connection under the lock. Reading
+        # ``self.connection`` after the lock release would race a
+        # concurrent ``close()`` that nulls the field, and we'd return
+        # ``None`` (or a connection that's about to be closed).
+        winner = None
         with self._lifecycle_lock:
             if self._permanently_closed:
                 stale = new_conn
+                # winner stays None — we'll raise after closing the throwaway.
             elif self.connection is not None:
                 # Lost the race — another caller already committed. Discard ours.
                 stale = new_conn
+                winner = self.connection
             else:
                 self.connection = new_conn
                 return new_conn
@@ -237,12 +254,12 @@ class LanceDBAdapter(VectorDBInterface):
             await stale.close()
         except Exception:
             pass
-        if self._permanently_closed:
+        if winner is None:
             raise RuntimeError(
                 "LanceDBAdapter is closed; a new adapter must be created "
                 "(subprocess-mode adapters cannot be re-initialized)."
             )
-        return self.connection
+        return winner
 
     # ------------------------------------------------------------------
     # Subprocess-mode conversion helpers. In local mode these are no-ops.

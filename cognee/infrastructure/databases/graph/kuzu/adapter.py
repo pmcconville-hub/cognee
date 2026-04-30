@@ -506,7 +506,22 @@ class KuzuAdapter(GraphDBInterface):
                     "be re-initialized in local mode."
                 )
             self._initialize_connection()
-        assert self.connection is not None
+            # Re-check the closed latch after init: ``close()`` may have
+            # flipped it while we were inside ``_initialize_connection``
+            # (which opens a kuzu.Database and takes the on-disk file
+            # lock). Without this re-check we'd publish the freshly
+            # opened native handles onto an already-closed adapter,
+            # keeping the file lock alive for the rest of the process.
+            with self._lifecycle_lock:
+                closed = self._permanently_closed
+            if closed:
+                self._drop_native_resources()
+                raise RuntimeError("KuzuAdapter is closed; a new adapter must be created.")
+        # Explicit check rather than ``assert`` — assertions are stripped
+        # under ``python -O`` and would degrade to a confusing
+        # ``AttributeError`` in callers if init silently failed.
+        if self.connection is None:
+            raise RuntimeError("KuzuAdapter connection initialization failed.")
         return self.connection
 
     def _submit_to_executor_locked(self, fn, *args):
