@@ -5,6 +5,7 @@ a subprocess that only imports ``lancedb`` + ``pyarrow`` (no cognee).
 
 from __future__ import annotations
 
+import asyncio
 import multiprocessing as mp
 import pickle
 from typing import Any, List, Optional, Tuple
@@ -307,25 +308,42 @@ class RemoteLanceDBConnection:
         self._url = url
         self._api_key = api_key
         self._connected = False
+        # Serializes first-time connects so concurrent callers (e.g. via
+        # ``asyncio.gather`` over multiple adapter operations) don't both
+        # observe ``_connected == False``, both issue ``OP_CONNECT``, and
+        # both append a replay step. Without this guard, ``_replay_steps``
+        # accumulates one duplicate per racing caller and every respawn
+        # then reconnects N times. ``asyncio.Lock`` binds to the running
+        # loop on first ``async with``, so eager construction here is fine.
+        self._connect_lock = asyncio.Lock()
+        self._connect_replay_step: Optional[ReplayStep] = None
 
     async def connect(self) -> None:
+        # Fast path: already connected, no lock needed.
         if self._connected:
             return
-        await self._session.call_async(
-            Request(op=OP_CONNECT, kwargs={"url": self._url, "api_key": self._api_key})
-        )
-        self._connected = True
-        # Replay step: on worker respawn, re-establish the underlying lancedb
-        # connection before any other op fires. Registered exactly once,
-        # after the first successful connect.
-        self._session.add_replay_step(
-            ReplayStep(
-                make_request=lambda: Request(
-                    op=OP_CONNECT,
-                    kwargs={"url": self._url, "api_key": self._api_key},
-                ),
+        # Slow path: re-check under the lock so only one task does the
+        # real connect + replay-step registration.
+        async with self._connect_lock:
+            if self._connected:
+                return
+            await self._session.call_async(
+                Request(op=OP_CONNECT, kwargs={"url": self._url, "api_key": self._api_key})
             )
-        )
+            self._connected = True
+            # Replay step: on worker respawn, re-establish the underlying
+            # lancedb connection before any other op fires. Registered
+            # exactly once — the ``is None`` guard makes ``connect()``
+            # idempotent against future flows that flip ``_connected``
+            # back to False (none today, but defensive).
+            if self._connect_replay_step is None:
+                self._connect_replay_step = ReplayStep(
+                    make_request=lambda: Request(
+                        op=OP_CONNECT,
+                        kwargs={"url": self._url, "api_key": self._api_key},
+                    ),
+                )
+                self._session.add_replay_step(self._connect_replay_step)
 
     async def _ensure_connected(self) -> None:
         if not self._connected:

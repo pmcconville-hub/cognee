@@ -495,6 +495,43 @@ async def test_lancedb_table_apply_new_handle_after_release_does_not_resurrect(t
 
 
 @pytest.mark.asyncio
+async def test_lancedb_connection_concurrent_connect_registers_one_replay_step(tmp_path):
+    """Concurrent ``connect()`` callers must not each append their own
+    OP_CONNECT replay step. Without the lock, every coroutine that
+    observes ``_connected == False`` before the first one returns will
+    register a duplicate, and every respawn then reconnects N times.
+    """
+    import asyncio as _asyncio
+
+    from cognee.infrastructure.databases.vector.lancedb.subprocess.proxy import (
+        LanceDBSubprocessSession,
+        RemoteLanceDBConnection,
+    )
+    from cognee_db_workers.lancedb_protocol import OP_CONNECT
+
+    session = LanceDBSubprocessSession.start()
+    try:
+        conn = RemoteLanceDBConnection(session, url=str(tmp_path / "lance"), api_key=None)
+
+        # 16 concurrent connect() calls. The first to reach the slow path
+        # should do the real work; the rest must be no-ops.
+        await _asyncio.gather(*(conn.connect() for _ in range(16)))
+
+        connect_steps = [
+            s
+            for s in session._replay_steps
+            if s.make_request().op == OP_CONNECT
+        ]
+        assert len(connect_steps) == 1, (
+            f"expected exactly one OP_CONNECT replay step, got {len(connect_steps)} — "
+            f"concurrent connect() calls are not properly serialized"
+        )
+        assert conn._connected is True
+    finally:
+        session.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_lancedb_table_async_with_releases_handle(tmp_path):
     """``async with table:`` must release the worker-side handle on exit.
 
