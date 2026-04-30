@@ -135,6 +135,17 @@ class HandleRegistry:
         self._handles[hid] = obj
         return hid
 
+    def register_at(self, hid: int, obj: Any) -> None:
+        """Register ``obj`` at a fixed pre-known handle id.
+
+        Used for singleton resources whose id the protocol has reserved
+        out-of-band (e.g. the LanceDB worker's per-process connection
+        slot). Keeps callers from reaching into ``self._handles``
+        directly so any future locking / invariants the registry
+        adopts apply uniformly.
+        """
+        self._handles[hid] = obj
+
     def get(self, hid: int) -> Any:
         return self._handles[hid]
 

@@ -44,7 +44,7 @@ async def _op_connect(registry: HandleRegistry, req: Request) -> None:
     api_key = req.kwargs.get("api_key")
 
     connection = await lancedb.connect_async(url, api_key=api_key)
-    registry._handles[_CONNECTION_HANDLE] = connection  # fixed slot
+    registry.register_at(_CONNECTION_HANDLE, connection)  # fixed singleton slot
     return None
 
 
