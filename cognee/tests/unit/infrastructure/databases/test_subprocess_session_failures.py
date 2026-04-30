@@ -312,13 +312,21 @@ async def test_kuzu_adapter_rejects_use_after_close(tmp_path):
         graph_file_path=str(tmp_path / "kz"),
         graph_database_subprocess_enabled=True,
     )
-    rows = await adapter.query("RETURN 1 AS x")
-    assert rows == [(1,)]
+    try:
+        rows = await adapter.query("RETURN 1 AS x")
+        assert rows == [(1,)]
 
-    await adapter.close()
+        await adapter.close()
 
-    with pytest.raises(RuntimeError, match="closed"):
-        await adapter.query("RETURN 1")
+        with pytest.raises(RuntimeError, match="closed"):
+            await adapter.query("RETURN 1")
+    finally:
+        # Idempotent close — guards against early assertion failure
+        # leaking the subprocess-backed worker into other tests.
+        try:
+            await adapter.close()
+        except Exception:
+            pass
 
 
 # --- retry / replay -------------------------------------------------------

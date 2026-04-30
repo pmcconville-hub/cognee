@@ -18,6 +18,13 @@ logger = logging.getLogger(__name__)
 _PENDING_CLOSE_TASKS: set = set()
 
 
+# Sentinel separating positional from keyword args in cache keys. Mirrors
+# ``functools.lru_cache``'s ``_kwd_mark`` so calls like ``fn(("a", 1))``
+# and ``fn(a=1)`` map to distinct entries — without it, both would
+# produce the key ``("a", 1)`` and collide.
+_KW_MARK = object()
+
+
 def _close_value(value):
     """Call close() on a value, scheduling it as a task if it returns a coroutine.
 
@@ -181,7 +188,12 @@ def closing_lru_cache(maxsize: Optional[int] = 128):
 
         @wraps(fn)
         def wrapper(*args, **kwargs):
-            key = args + tuple(sorted(kwargs.items()))
+            # ``_KW_MARK`` separates positional from keyword args so
+            # ``fn(("a", 1))`` and ``fn(a=1)`` don't collide.
+            if kwargs:
+                key = args + (_KW_MARK,) + tuple(sorted(kwargs.items()))
+            else:
+                key = args
             return cache.get_or_create(key, lambda: fn(*args, **kwargs))
 
         wrapper.cache_clear = cache.cache_clear

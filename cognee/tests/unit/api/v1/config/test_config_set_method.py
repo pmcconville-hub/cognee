@@ -76,3 +76,33 @@ class TestConfigSetMethod:
 
         for key, value in test_cases:
             config.set(key, value)
+
+    def test_set_graph_db_config_coerces_string_values(self):
+        """Bulk ``set_graph_db_config`` must coerce string payloads to the
+        field's declared type — e.g. ``{"graph_database_subprocess_enabled":
+        "true"}`` should land as ``bool True``, not the literal string.
+        Without coercion, downstream ``if subprocess_enabled:`` evaluates
+        a non-empty string as truthy regardless of its content.
+        """
+        from cognee.infrastructure.databases.graph.config import get_graph_config
+
+        config.set_graph_db_config(
+            {
+                "graph_database_subprocess_enabled": "true",
+                "kuzu_num_threads": "4",
+            }
+        )
+        cfg = get_graph_config()
+        assert cfg.graph_database_subprocess_enabled is True
+        assert cfg.kuzu_num_threads == 4
+
+        # Native types pass through unchanged.
+        config.set_graph_db_config(
+            {
+                "graph_database_subprocess_enabled": False,
+                "kuzu_num_threads": 8,
+            }
+        )
+        cfg = get_graph_config()
+        assert cfg.graph_database_subprocess_enabled is False
+        assert cfg.kuzu_num_threads == 8

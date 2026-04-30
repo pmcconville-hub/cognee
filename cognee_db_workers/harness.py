@@ -435,10 +435,13 @@ class SubprocessSession:
         self._rpc_lock = threading.Lock()
         self._terminate_lock = threading.Lock()
         self._respawn_lock = threading.Lock()
-
-        # Register in the global weak set so ``collect_garbage_in_all_workers``
-        # can reach this session without an explicit reference.
-        _all_sessions.add(self)
+        # Set by ``wait_for_ready`` after the worker emits its READY
+        # sentinel. Used to gate registration in the global ``_all_sessions``
+        # set: a session that's still waiting for its sentinel must not be
+        # visible to ``collect_garbage_in_all_workers`` — a concurrent GC
+        # sweep would consume the sentinel from ``_resp_q`` and cause
+        # ``wait_for_ready`` to time out and kill a healthy worker.
+        self._ready = False
 
     @property
     def pid(self) -> Optional[int]:
@@ -468,6 +471,14 @@ class SubprocessSession:
             raise SubprocessTransportError(
                 f"Unexpected subprocess startup response: {resp.result!r}"
             )
+        # Only register in ``_all_sessions`` after the worker is actually
+        # ready. Doing this in ``__init__`` exposed the session to
+        # ``collect_garbage_in_all_workers`` before the READY sentinel was
+        # consumed; a concurrent GC sweep could steal the sentinel from
+        # ``_resp_q``, causing ``wait_for_ready`` (this method) to time
+        # out and kill a healthy worker.
+        self._ready = True
+        _all_sessions.add(self)
 
     def add_replay_step(self, step: ReplayStep) -> None:
         """Register a setup RPC to replay after a respawn. Order is preserved.
@@ -689,8 +700,12 @@ class SubprocessSession:
                     from dataclasses import replace as _replace
 
                     req = _replace(req, handle_id=new_remap[req.handle_id])
-                # Bypass the retry loop and the per-call timeout for replay
-                # itself; we don't want recursive retries here.
+                # Bypass the retry loop for replay itself — we don't want
+                # recursive retries while we're already mid-respawn. The
+                # per-call deadline still applies (``_raw_call_locked`` uses
+                # ``_resolve_deadline(...)`` which collapses to the session
+                # default), so a hung worker on replay will eventually
+                # surface as ``TimeoutError`` rather than blocking forever.
                 resp = self._raw_call_locked(req)
                 if resp.new_handle_id is not None and step.apply_new_handle is not None:
                     old_id = step.apply_new_handle(resp.new_handle_id)

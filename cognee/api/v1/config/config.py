@@ -35,9 +35,7 @@ def _coerce_bool(value, name: str) -> bool:
             return True
         if normalized in _BOOL_FALSE:
             return False
-    raise ValueError(
-        f"{name} must be a bool or boolean-like string (true/false), got {value!r}"
-    )
+    raise ValueError(f"{name} must be a bool or boolean-like string (true/false), got {value!r}")
 
 
 def _coerce_int(value, name: str, *, min_value: int | None = None) -> int:
@@ -59,6 +57,40 @@ def _coerce_int(value, name: str, *, min_value: int | None = None) -> int:
     if min_value is not None and result < min_value:
         raise ValueError(f"{name} must be >= {min_value}, got {result}")
     return result
+
+
+def _coerce_for_field(config_obj, key: str, value):
+    """Coerce ``value`` to the declared type of ``config_obj.<key>`` for the
+    common ``bool`` and ``int`` cases. Used by ``_update_config`` so bulk
+    setters (``set_graph_db_config(...)`` etc.) accept the same string
+    payloads the CLI-targeted single-key setters do — without this, a
+    payload like ``{"graph_database_subprocess_enabled": "true"}`` would
+    persist as the string ``"true"`` and break ``if subprocess_enabled:``
+    downstream.
+
+    Other annotated types pass through unchanged. Non-pydantic models also
+    pass through (``model_fields`` is missing).
+    """
+    import typing
+
+    fields = getattr(type(config_obj), "model_fields", None)
+    if fields is None:
+        return value
+    info = fields.get(key)
+    if info is None:
+        return value
+    annotation = info.annotation
+    # Unwrap ``Optional[X]`` / ``X | None``.
+    args = typing.get_args(annotation)
+    if args:
+        non_none = [a for a in args if a is not type(None)]
+        if len(non_none) == 1:
+            annotation = non_none[0]
+    if annotation is bool:
+        return _coerce_bool(value, key)
+    if annotation is int:
+        return _coerce_int(value, key)
+    return value
 
 
 class config:
@@ -310,7 +342,13 @@ class config:
         """
         for key, value in config_dict.items():
             if hasattr(config_obj, key):
-                object.__setattr__(config_obj, key, value)
+                # Coerce stringy values to the field's declared bool/int
+                # type so payloads coming from the CLI / generic dispatch
+                # land with the right runtime types — same contract as the
+                # single-key setters (``set_graph_database_subprocess_enabled``
+                # etc.) which accept ``"true"`` / ``"4"`` and parse them.
+                coerced = _coerce_for_field(config_obj, key, value)
+                object.__setattr__(config_obj, key, coerced)
             else:
                 raise InvalidConfigAttributeError(attribute=key)
 

@@ -400,3 +400,25 @@ def test_decorator_maxsize_none_is_unbounded():
     # Re-fetching any earlier key returns the same object — nothing was evicted.
     for i, obj in enumerate(objs):
         assert create(i) is obj
+
+
+def test_decorator_args_and_kwargs_with_same_payload_do_not_collide():
+    """Mirror of ``functools.lru_cache``'s positional/kwargs separation:
+    ``fn(("a", 1))`` and ``fn(a=1)`` must produce distinct cache entries
+    even though their concatenated tuple representations would otherwise
+    coincide. Without the ``_KW_MARK`` sentinel between args and sorted
+    kwargs items, both calls would compute key ``("a", 1)`` and the
+    cache would return the wrong instance for one of them.
+    """
+    call_count = 0
+
+    @closing_lru_cache(maxsize=4)
+    def create(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return _Closeable(f"args={args}|kwargs={kwargs}")
+
+    a = create(("a", 1))
+    b = create(a=1)
+    assert a is not b, "positional and keyword call shapes must not collide"
+    assert call_count == 2

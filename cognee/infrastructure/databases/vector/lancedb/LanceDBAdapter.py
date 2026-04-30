@@ -69,8 +69,12 @@ class IndexSchema(DataPoint):
 
 class LanceDBAdapter(VectorDBInterface):
     name = "LanceDB"
-    url: str
-    api_key: str
+    # ``Optional`` because ``__init__`` accepts ``None`` for both — local
+    # mode without an API key passes ``api_key=None``, and subprocess-mode
+    # adapters constructed from cached state may also receive ``url=None``
+    # (the ``RemoteLanceDBConnection`` carries the real URL).
+    url: Optional[str]
+    api_key: Optional[str]
     connection = None
 
     # Class-level memoization caches. They are shared across all adapter

@@ -208,16 +208,11 @@ async def test_add_edges_batch(adapter):
     kg = _load_demo_kg()
     await adapter.add_nodes(kg.nodes)
 
-    edge_rows = [
-        (e.source_node_id, e.target_node_id, e.relationship_name, {})
-        for e in kg.edges
-    ]
+    edge_rows = [(e.source_node_id, e.target_node_id, e.relationship_name, {}) for e in kg.edges]
     await adapter.add_edges(edge_rows)
 
     # Verify all edges exist
-    check_edges = [
-        (e.source_node_id, e.target_node_id, e.relationship_name) for e in kg.edges
-    ]
+    check_edges = [(e.source_node_id, e.target_node_id, e.relationship_name) for e in kg.edges]
     existing = await adapter.has_edges(check_edges)
     assert len(existing) == len(kg.edges)
 
@@ -232,10 +227,7 @@ async def test_get_neighbors(adapter):
     kg = _load_demo_kg()
     await adapter.add_nodes(kg.nodes)
 
-    edge_rows = [
-        (e.source_node_id, e.target_node_id, e.relationship_name, {})
-        for e in kg.edges
-    ]
+    edge_rows = [(e.source_node_id, e.target_node_id, e.relationship_name, {}) for e in kg.edges]
     await adapter.add_edges(edge_rows)
 
     # Mark has edges: Alice->Mark (knows), Mark->Bob (had_dinner_with), Mark->Alice (had_dinner_with)
@@ -255,10 +247,7 @@ async def test_get_connections(adapter):
     kg = _load_demo_kg()
     await adapter.add_nodes(kg.nodes)
 
-    edge_rows = [
-        (e.source_node_id, e.target_node_id, e.relationship_name, {})
-        for e in kg.edges
-    ]
+    edge_rows = [(e.source_node_id, e.target_node_id, e.relationship_name, {}) for e in kg.edges]
     await adapter.add_edges(edge_rows)
 
     connections = await adapter.get_connections("Mark")
@@ -279,10 +268,7 @@ async def test_get_graph_data(adapter):
     kg = _load_demo_kg()
     await adapter.add_nodes(kg.nodes)
 
-    edge_rows = [
-        (e.source_node_id, e.target_node_id, e.relationship_name, {})
-        for e in kg.edges
-    ]
+    edge_rows = [(e.source_node_id, e.target_node_id, e.relationship_name, {}) for e in kg.edges]
     await adapter.add_edges(edge_rows)
 
     nodes, edges = await adapter.get_graph_data()
@@ -300,10 +286,7 @@ async def test_get_filtered_graph_data(adapter):
     kg = _load_demo_kg()
     await adapter.add_nodes(kg.nodes)
 
-    edge_rows = [
-        (e.source_node_id, e.target_node_id, e.relationship_name, {})
-        for e in kg.edges
-    ]
+    edge_rows = [(e.source_node_id, e.target_node_id, e.relationship_name, {}) for e in kg.edges]
     await adapter.add_edges(edge_rows)
 
     # Filter by type = "Person"
@@ -323,10 +306,7 @@ async def test_predecessors_and_successors(adapter):
     kg = _load_demo_kg()
     await adapter.add_nodes(kg.nodes)
 
-    edge_rows = [
-        (e.source_node_id, e.target_node_id, e.relationship_name, {})
-        for e in kg.edges
-    ]
+    edge_rows = [(e.source_node_id, e.target_node_id, e.relationship_name, {}) for e in kg.edges]
     await adapter.add_edges(edge_rows)
 
     # Alice->Mark (knows), so Mark's predecessors with "knows" should include Alice
@@ -350,10 +330,7 @@ async def test_get_graph_metrics(adapter):
     kg = _load_demo_kg()
     await adapter.add_nodes(kg.nodes)
 
-    edge_rows = [
-        (e.source_node_id, e.target_node_id, e.relationship_name, {})
-        for e in kg.edges
-    ]
+    edge_rows = [(e.source_node_id, e.target_node_id, e.relationship_name, {}) for e in kg.edges]
     await adapter.add_edges(edge_rows)
 
     metrics = await adapter.get_graph_metrics()
@@ -378,10 +355,7 @@ async def test_get_disconnected_nodes(adapter):
     assert len(disconnected) == len(kg.nodes)
 
     # After adding edges, connected nodes should disappear from the list
-    edge_rows = [
-        (e.source_node_id, e.target_node_id, e.relationship_name, {})
-        for e in kg.edges
-    ]
+    edge_rows = [(e.source_node_id, e.target_node_id, e.relationship_name, {}) for e in kg.edges]
     await adapter.add_edges(edge_rows)
 
     disconnected_after = await adapter.get_disconnected_nodes()
@@ -425,10 +399,7 @@ async def test_get_triplets_batch(adapter):
     kg = _load_demo_kg()
     await adapter.add_nodes(kg.nodes)
 
-    edge_rows = [
-        (e.source_node_id, e.target_node_id, e.relationship_name, {})
-        for e in kg.edges
-    ]
+    edge_rows = [(e.source_node_id, e.target_node_id, e.relationship_name, {}) for e in kg.edges]
     await adapter.add_edges(edge_rows)
 
     triplets = await adapter.get_triplets_batch(offset=0, limit=10)
@@ -611,9 +582,7 @@ async def test_close_is_idempotent(kuzu_adapter):
 
 
 @pytest.mark.asyncio
-async def test_query_does_not_block_event_loop_during_slow_redis_acquire(
-    kuzu_adapter, monkeypatch
-):
+async def test_query_does_not_block_event_loop_during_slow_redis_acquire(kuzu_adapter, monkeypatch):
     """``redis_lock.acquire_lock()`` and ``release_lock()`` are sync calls
     that do Redis I/O (default ``blocking_timeout=300s``). When invoked
     from ``query()`` on the event-loop thread they would freeze the
@@ -641,9 +610,7 @@ async def test_query_does_not_block_event_loop_during_slow_redis_acquire(
     # Force the shared-lock branch. ``cache_config`` is module-global on
     # the adapter module; mutating its ``shared_kuzu_lock`` flag is
     # enough to send ``query()`` down the redis-lock path.
-    monkeypatch.setattr(
-        kuzu_adapter_mod.cache_config, "shared_kuzu_lock", True
-    )
+    monkeypatch.setattr(kuzu_adapter_mod.cache_config, "shared_kuzu_lock", True)
 
     ticks = 0
     stop = asyncio.Event()
