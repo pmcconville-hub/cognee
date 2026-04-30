@@ -356,24 +356,20 @@ class KuzuAdapter(GraphDBInterface):
 
             - List[Tuple]: A list of tuples representing the query results.
         """
-        # Atomically check the closed flag AND capture the executor
-        # reference under ``_lifecycle_lock``. Submitting later to the
-        # *captured* executor (not ``self.executor``) eliminates the
-        # race where ``close()`` shuts down the executor between our
-        # check and ``run_in_executor`` — close() pulls the executor
-        # out under the same lock before shutting it down, so we either
-        # see the closed flag or get a still-live reference.
-        with self._lifecycle_lock:
-            if self._permanently_closed:
-                raise RuntimeError("KuzuAdapter is closed; a new adapter must be created.")
-            executor = self.executor
-            if executor is None:
-                raise RuntimeError("KuzuAdapter is closed; a new adapter must be created.")
+        # Note on ``close()`` synchronization: actual submission of the
+        # blocking work happens under ``_lifecycle_lock`` further down
+        # via ``_submit_to_executor_locked``. Capturing the executor
+        # reference *before* ``run_in_executor`` would not be enough —
+        # ``close()`` could call ``executor.shutdown()`` on the captured
+        # ref between capture and submit, surfacing "cannot schedule
+        # new futures after shutdown" anyway. Submitting under the lock
+        # closes that window: ``close()`` either runs first (and we
+        # raise from the helper) or runs after (and ``shutdown(wait=True)``
+        # waits for our queued future to complete).
         with new_span("cognee.db.graph.query") as otel_span:
             otel_span.set_attribute(COGNEE_DB_SYSTEM, "kuzu")
             otel_span.set_attribute(COGNEE_DB_QUERY, redact_secrets(query[:500]))
 
-            loop = asyncio.get_running_loop()
             params = params or {}
 
             def blocking_query(connection):
@@ -422,12 +418,10 @@ class KuzuAdapter(GraphDBInterface):
                                 self._all_queries_drained.clear()
                         logger.info(f"Open connections after open: {self.open_connections}")
                         try:
-                            # Submit to the captured ``executor`` ref (not
-                            # ``self.executor``) — see lifecycle-lock comment
-                            # at the top of this method.
-                            result = await loop.run_in_executor(
-                                executor, blocking_query, connection
-                            )
+                            # Submit + check-closed atomically under
+                            # ``_lifecycle_lock``. See top-of-method note.
+                            future = self._submit_to_executor_locked(blocking_query, connection)
+                            result = await asyncio.wrap_future(future)
                         finally:
                             # Decrement under ``_counter_lock`` (not
                             # ``_connection_lock`` — teardown holds the
@@ -466,10 +460,10 @@ class KuzuAdapter(GraphDBInterface):
                             self.open_connections += 1
                             self._all_queries_drained.clear()
                     try:
-                        # Submit to the captured ``executor`` ref (not
-                        # ``self.executor``) — see lifecycle-lock comment
-                        # at the top of this method.
-                        result = await loop.run_in_executor(executor, blocking_query, connection)
+                        # Submit + check-closed atomically under
+                        # ``_lifecycle_lock``. See top-of-method note.
+                        future = self._submit_to_executor_locked(blocking_query, connection)
+                        result = await asyncio.wrap_future(future)
                     finally:
                         # Decrement under ``_counter_lock`` (not
                         # ``_connection_lock`` — teardown holds the latter
@@ -514,6 +508,29 @@ class KuzuAdapter(GraphDBInterface):
             self._initialize_connection()
         assert self.connection is not None
         return self.connection
+
+    def _submit_to_executor_locked(self, fn, *args):
+        """Atomically check ``_permanently_closed`` AND submit ``fn`` to
+        ``self.executor``, all under ``_lifecycle_lock``.
+
+        Submitting under the lock (rather than capturing the executor
+        ref and submitting later) is what closes the close-vs-query
+        race: if ``close()`` is interleaving, it must take the same
+        lock to flip the flag and pull the executor reference. So the
+        only two outcomes here are (a) we observe the closed flag and
+        raise, or (b) we get a stable reference and ``executor.submit``
+        succeeds — at which point ``close()``'s
+        ``executor.shutdown(wait=True)`` will wait for our just-queued
+        future to complete, instead of refusing to schedule it.
+
+        Returns a ``concurrent.futures.Future``; await
+        ``asyncio.wrap_future(future)`` to consume the result on the
+        calling event loop.
+        """
+        with self._lifecycle_lock:
+            if self._permanently_closed or self.executor is None:
+                raise RuntimeError("KuzuAdapter is closed; a new adapter must be created.")
+            return self.executor.submit(fn, *args)
 
     def _drop_native_resources(self) -> None:
         """Synchronously drop the native Kuzu Database + Connection handles.
