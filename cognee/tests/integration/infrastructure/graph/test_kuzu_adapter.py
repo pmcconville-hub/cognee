@@ -581,3 +581,30 @@ async def test_close_does_not_block_event_loop_in_subprocess_mode(tmp_path):
         f"event loop appears blocked during close: only {ticks} heartbeats "
         f"during a 300ms slow drop — _drop_native_resources is not offloaded"
     )
+
+
+@pytest.mark.asyncio
+async def test_query_after_close_raises_clean_error(kuzu_adapter):
+    """A ``query()`` issued after ``close()`` must surface a clean
+    "adapter is closed" RuntimeError, not a low-level executor error
+    (e.g. "cannot schedule new futures after shutdown") leaking through
+    from the just-shut-down ThreadPoolExecutor. ``close()`` latches
+    ``_permanently_closed`` at its start so the up-front check in
+    ``query()`` catches the call before it reaches ``run_in_executor``.
+    """
+    await kuzu_adapter.close()
+
+    with pytest.raises(RuntimeError, match="closed") as excinfo:
+        await kuzu_adapter.query("MATCH (n) RETURN n")
+    # Must not be the executor's own error message.
+    assert "cannot schedule new futures" not in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_close_is_idempotent(kuzu_adapter):
+    """``close()`` may be invoked multiple times (e.g. by both LRU
+    eviction and ``__del__`` / explicit teardown). The second call must
+    return cleanly without re-shutting-down anything."""
+    await kuzu_adapter.close()
+    # Second call should be a no-op — must not raise.
+    await kuzu_adapter.close()

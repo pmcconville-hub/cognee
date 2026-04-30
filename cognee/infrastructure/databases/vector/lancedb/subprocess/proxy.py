@@ -249,8 +249,12 @@ class RemoteLanceDBTable:
             Request(op=OP_TABLE_TO_ARROW, handle_id=self.handle_id)
         )
         buf = resp.result
-        reader = pa.ipc.open_stream(pa.py_buffer(buf))
-        return reader.read_all()
+        # Use the reader as a context manager so its native buffers are
+        # released as soon as ``read_all()`` materializes the Table —
+        # otherwise the reader (and the wrapped pa.py_buffer) lingers
+        # until GC and accumulates across repeated calls.
+        with pa.ipc.open_stream(pa.py_buffer(buf)) as reader:
+            return reader.read_all()
 
     async def add(self, records: list) -> None:
         await self._session.call_async(

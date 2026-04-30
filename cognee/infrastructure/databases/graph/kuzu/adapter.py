@@ -346,6 +346,14 @@ class KuzuAdapter(GraphDBInterface):
 
             - List[Tuple]: A list of tuples representing the query results.
         """
+        # Fail fast if the adapter is closed — a concurrent ``close()``
+        # may have already shut down the executor, and reaching
+        # ``run_in_executor`` below would raise the cryptic
+        # "cannot schedule new futures after shutdown".
+        if self._permanently_closed:
+            raise RuntimeError(
+                "KuzuAdapter is closed; a new adapter must be created."
+            )
         with new_span("cognee.db.graph.query") as otel_span:
             otel_span.set_attribute(COGNEE_DB_SYSTEM, "kuzu")
             otel_span.set_attribute(COGNEE_DB_QUERY, redact_secrets(query[:500]))
@@ -466,11 +474,21 @@ class KuzuAdapter(GraphDBInterface):
         Callers must hold ``_connection_lock`` to prevent races with
         explicit calls to ``close()``.
         """
+        # Top-level closed check applies in BOTH modes. ``close()`` latches
+        # ``_permanently_closed`` at its start (before tearing anything
+        # down), so this fails fast and cleanly during teardown rather
+        # than letting a query reach a half-dismantled adapter and surface
+        # a low-level error like "cannot schedule new futures after
+        # shutdown" from the executor.
+        if self._permanently_closed:
+            raise RuntimeError(
+                "KuzuAdapter is closed; a new adapter must be created."
+            )
         if not self.connection:
-            if self._subprocess_mode or self._permanently_closed:
+            if self._subprocess_mode:
                 raise RuntimeError(
-                    "KuzuAdapter is closed; a new adapter must be created "
-                    "(subprocess-mode adapters cannot be re-initialized)."
+                    "KuzuAdapter subprocess session is gone; adapter cannot "
+                    "be re-initialized in local mode."
                 )
             self._initialize_connection()
         assert self.connection is not None
@@ -545,7 +563,21 @@ class KuzuAdapter(GraphDBInterface):
         ``_drain_in_flight_queries`` helper instead, but that's not safe
         from a foreign loop — ``executor.shutdown(wait=True)`` is the
         cross-loop equivalent and the only correct choice here.
+
+        Idempotent — repeated calls observe ``_permanently_closed`` and
+        return early without re-shutting-down anything.
         """
+        # Latch the closed flag BEFORE tearing anything down. Concurrent
+        # ``query()`` callers re-check this at their entry point and fail
+        # fast with a clean "adapter is closed" error rather than reaching
+        # ``run_in_executor`` and getting the cryptic "cannot schedule new
+        # futures after shutdown" from the just-shut-down executor.
+        # The flag also makes ``close()`` idempotent — a second call sees
+        # it set and returns without touching anything.
+        if self._permanently_closed:
+            return
+        self._permanently_closed = True
+
         # Both ``executor.shutdown(wait=True)`` and
         # ``SubprocessSession.shutdown()`` are sync-blocking calls that can
         # take seconds (executor: thread join; session: join/terminate/kill
@@ -573,7 +605,6 @@ class KuzuAdapter(GraphDBInterface):
             except Exception as e:
                 logger.warning(f"Error shutting down Kuzu subprocess: {e}")
             self._session = None
-        self._permanently_closed = True
         logger.info("Kuzu database closed successfully")
 
     @asynccontextmanager
