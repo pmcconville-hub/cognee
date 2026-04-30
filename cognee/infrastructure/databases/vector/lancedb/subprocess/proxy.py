@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import multiprocessing as mp
-import pickle
 from typing import Any, Dict, List, Optional, Tuple
 
 import pyarrow as pa
@@ -368,7 +367,12 @@ class RemoteLanceDBConnection:
         self, name: str, schema: pa.Schema, exist_ok: bool = True
     ) -> "RemoteLanceDBTable":
         await self._ensure_connected()
-        schema_bytes = pickle.dumps(schema)
+        # Use Arrow's native IPC schema serialization rather than pickle —
+        # the worker is otherwise an unconditional ``pickle.loads`` target
+        # for any value that lands on its request queue. ``ipc`` is a
+        # typed, structured format and ``read_schema`` rejects anything
+        # that isn't a valid Arrow schema.
+        schema_bytes = schema.serialize().to_pybytes()
         await self._session.call_async(
             Request(op=OP_CREATE_TABLE, args=(name, schema_bytes, exist_ok))
         )

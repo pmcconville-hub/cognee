@@ -25,7 +25,6 @@ from cognee.modules.storage.utils import JSONEncoder
 from cognee.modules.engine.utils.generate_timestamp_datapoint import date_to_int
 from cognee.tasks.temporal_graph.models import Timestamp
 from cognee.infrastructure.databases.cache.config import get_cache_config
-from cognee.infrastructure.databases.cache.get_cache_engine import get_cache_engine
 from cognee.modules.observability import new_span
 from cognee.modules.observability.tracing import (
     COGNEE_DB_SYSTEM,

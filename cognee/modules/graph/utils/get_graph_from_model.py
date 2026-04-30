@@ -1,4 +1,6 @@
+from collections import OrderedDict
 from datetime import datetime, timezone
+from threading import Lock
 from typing import Tuple, List, Any, Dict, Optional
 from cognee.infrastructure.engine import DataPoint, Edge
 from cognee.modules.storage.utils import copy_model
@@ -15,16 +17,32 @@ logger = get_logger()
 # attributed +~50 MB per large-text cognify cycle to pydantic internals;
 # this cache is keyed by ``(DataPoint subclass, sorted excluded fields)`` so
 # different call sites with the same shape share one class.
-_SIMPLE_MODEL_CACHE: dict = {}
+#
+# Bounded LRU. An unbounded dict would itself grow without limit if
+# call-site exclusions vary, defeating the leak fix it was added for.
+_SIMPLE_MODEL_CACHE_SIZE = 256
+_SIMPLE_MODEL_CACHE: "OrderedDict" = OrderedDict()
+_SIMPLE_MODEL_CACHE_LOCK = Lock()
 
 
 def _simple_model_for(data_point_type, excluded_fields):
     key = (data_point_type, tuple(sorted(excluded_fields)))
-    cached = _SIMPLE_MODEL_CACHE.get(key)
-    if cached is not None:
-        return cached
+    with _SIMPLE_MODEL_CACHE_LOCK:
+        cached = _SIMPLE_MODEL_CACHE.get(key)
+        if cached is not None:
+            _SIMPLE_MODEL_CACHE.move_to_end(key)
+            return cached
     model = copy_model(data_point_type, exclude_fields=list(excluded_fields))
-    _SIMPLE_MODEL_CACHE[key] = model
+    with _SIMPLE_MODEL_CACHE_LOCK:
+        # Re-check after the heavy ``copy_model`` — another thread may
+        # have raced us; if so, return the winner and discard our build.
+        existing = _SIMPLE_MODEL_CACHE.get(key)
+        if existing is not None:
+            _SIMPLE_MODEL_CACHE.move_to_end(key)
+            return existing
+        _SIMPLE_MODEL_CACHE[key] = model
+        if len(_SIMPLE_MODEL_CACHE) > _SIMPLE_MODEL_CACHE_SIZE:
+            _SIMPLE_MODEL_CACHE.popitem(last=False)
     return model
 
 

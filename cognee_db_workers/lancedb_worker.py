@@ -4,8 +4,6 @@
 
 from __future__ import annotations
 
-import pickle
-
 from .harness import (
     DEFAULT_DISPATCH,
     HandleRegistry,
@@ -99,9 +97,11 @@ async def _op_create_table(registry: HandleRegistry, req: Request):
     schema_bytes = req.args[1]
     exist_ok = bool(req.args[2]) if len(req.args) > 2 else True
 
-    schema = pickle.loads(schema_bytes)
-    if isinstance(schema, pa.Schema):
-        schema = _relax_nullability(schema)
+    # Arrow IPC (not pickle) — ``read_schema`` validates the wire format
+    # and rejects anything that isn't a valid Arrow schema, eliminating
+    # the unconditional ``pickle.loads`` RCE surface on this RPC.
+    schema = pa.ipc.read_schema(pa.py_buffer(schema_bytes))
+    schema = _relax_nullability(schema)
     await conn.create_table(name=name, schema=schema, exist_ok=exist_ok)
     return None
 
