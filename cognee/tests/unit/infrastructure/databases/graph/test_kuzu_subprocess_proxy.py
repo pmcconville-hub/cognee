@@ -152,3 +152,32 @@ def test_post_close_respawn_does_not_resurrect_handle(tmp_path):
         assert db._handle_id is None
     finally:
         session.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# KuzuAdapter constructor validation
+# ---------------------------------------------------------------------------
+
+
+def test_kuzu_adapter_rejects_partial_injection(tmp_path):
+    """Mirror of ``LanceDBAdapter`` validation: ``database``, ``connection``,
+    and ``session`` must all be provided (subprocess mode) or all left
+    ``None`` (local mode). Half-configured states would either leak a
+    worker on close or have no proxies to drive.
+    """
+    from cognee.infrastructure.databases.graph.kuzu.adapter import KuzuAdapter
+
+    sentinel = object()
+
+    # Each of the seven invalid combinations.
+    invalid_combos = [
+        {"database": sentinel},
+        {"connection": sentinel},
+        {"session": sentinel},
+        {"database": sentinel, "connection": sentinel},
+        {"database": sentinel, "session": sentinel},
+        {"connection": sentinel, "session": sentinel},
+    ]
+    for kwargs in invalid_combos:
+        with pytest.raises(ValueError, match="all of"):
+            KuzuAdapter(db_path=str(tmp_path / "kuzu_partial"), **kwargs)

@@ -34,6 +34,7 @@ OP_ECHO = 1
 OP_SLEEP = 2
 OP_RETURN_UNPICKLABLE = 3
 OP_SLEEP_PARAM = 4
+OP_RAISE_PICKLABLE = 5
 
 
 def _echo(registry, req):
@@ -61,11 +62,27 @@ def _return_unpicklable(registry, req):
     return _NotPicklable()
 
 
+def _raise_picklable(registry, req):
+    # Raise an ordinary picklable exception with a deep call stack so the
+    # remote traceback is non-trivial. Helper functions at module scope
+    # so the inner frames show up in the traceback string.
+    _layer_a()
+
+
+def _layer_a():
+    _layer_b()
+
+
+def _layer_b():
+    raise ValueError("worker-side boom")
+
+
 DISPATCH = {
     OP_ECHO: _echo,
     OP_SLEEP: _sleep,
     OP_SLEEP_PARAM: _sleep_param,
     OP_RETURN_UNPICKLABLE: _return_unpicklable,
+    OP_RAISE_PICKLABLE: _raise_picklable,
 }
 
 
@@ -157,6 +174,43 @@ def test_call_returns_echo():
     try:
         resp = session.call(Request(op=OP_ECHO, args=("hello",)))
         assert resp.result == "hello"
+    finally:
+        session.shutdown()
+
+
+# Note on monotonic-clock testing: ``_resolve_deadline`` and
+# ``_wait_response`` switched from ``time.time()`` to ``time.monotonic()``
+# (Copilot review comment 3167236652) so deadline math can't be skewed by
+# wall-clock jumps. We deliberately don't add a unit test for this: a
+# meaningful test would have to monkeypatch ``time.monotonic`` (or both
+# clocks together) and inject a clock jump mid-call, which is invasive
+# and brittle. The change is a clean swap to a strictly-monotonic source,
+# verifiable by code review; the existing timeout/deadline tests
+# (``test_call_timeout_on_hung_worker``, ``test_per_call_timeout_override``)
+# continue to exercise the deadline path with the new clock domain.
+
+
+def test_picklable_worker_exception_carries_remote_traceback():
+    """When the worker raises a picklable exception, the local caller
+    should see the same exception type AND have access to the remote
+    traceback via ``__notes__`` (PEP 678). Without preservation, the
+    worker-side stack frames are lost and debugging gets harder.
+    """
+    session = _start_session()
+    try:
+        with pytest.raises(ValueError, match="worker-side boom") as excinfo:
+            session.call(Request(op=OP_RAISE_PICKLABLE))
+        notes = getattr(excinfo.value, "__notes__", []) or []
+        joined = "\n".join(notes)
+        # Note: ``add_note`` is Python 3.11+. On 3.10 the test still
+        # asserts the exception type/message but skips the notes check.
+        if hasattr(excinfo.value, "add_note"):
+            assert "Remote subprocess traceback:" in joined, (
+                "remote traceback annotation missing from exception notes"
+            )
+            assert "_layer_b" in joined, (
+                "remote traceback should include worker-side stack frames"
+            )
     finally:
         session.shutdown()
 

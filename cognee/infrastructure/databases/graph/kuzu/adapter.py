@@ -87,14 +87,29 @@ class KuzuAdapter(GraphDBInterface):
             and ``database``/``connection`` are main-side proxies. In this mode
             the adapter does NOT rebuild the connection lazily on close; the
             lifecycle is owned by the factory + LRU cache.
+
+            ``database``, ``connection``, and ``session`` must be provided
+            together (subprocess mode) or all left ``None`` (local mode).
+            Mixing them creates an adapter that cannot cleanly close — e.g.
+            ``connection`` without ``session`` leaks a worker, ``session``
+            without the others has no proxies to drive. Reject up front.
         """
+        injection_count = sum(
+            x is not None for x in (database, connection, session)
+        )
+        if injection_count not in (0, 3):
+            raise ValueError(
+                "KuzuAdapter requires all of `database`, `connection`, and "
+                "`session` for subprocess mode, or all left `None` for local "
+                "mode."
+            )
         self.open_connections = 0
         self.db_path = db_path  # Path for the database directory
         self.kuzu_num_threads = kuzu_num_threads
         self.kuzu_buffer_pool_size = kuzu_buffer_pool_size
         self.kuzu_max_db_size = kuzu_max_db_size
         self._session = session
-        injected = database is not None and connection is not None
+        injected = injection_count == 3
         # Remember that this adapter was constructed in subprocess-proxy mode.
         # After close(), we must NOT silently fall through to a local
         # kuzu.Database re-init on the same db_path — that would conflict with
@@ -542,7 +557,16 @@ class KuzuAdapter(GraphDBInterface):
         executor = getattr(self, "executor", None)
         if executor is not None:
             await asyncio.to_thread(executor.shutdown, True)
-        self._drop_native_resources()
+        # In subprocess mode, ``_drop_native_resources`` calls
+        # ``self.connection.close()`` and ``self.db.close()`` which are
+        # proxy RPCs through ``session.call(...)`` and can block on
+        # the worker for hundreds of ms. Offload to a thread so we
+        # don't freeze the event loop. Local mode stays sync — closing
+        # an in-process Kuzu Database/Connection is fast.
+        if self._subprocess_mode:
+            await asyncio.to_thread(self._drop_native_resources)
+        else:
+            self._drop_native_resources()
         if self._session is not None:
             try:
                 await asyncio.to_thread(self._session.shutdown)
@@ -2279,7 +2303,13 @@ class KuzuAdapter(GraphDBInterface):
             # us against them).
             async with self._connection_lock:
                 await self._drain_in_flight_queries()
-                self._drop_native_resources()
+                # Subprocess mode: ``_drop_native_resources`` issues two
+                # RPCs (OP_CONN_CLOSE + OP_DB_CLOSE) which block on the
+                # worker. Offload so we don't freeze the event loop.
+                if self._subprocess_mode:
+                    await asyncio.to_thread(self._drop_native_resources)
+                else:
+                    self._drop_native_resources()
 
             db_dir = os.path.dirname(self.db_path)
             db_name = os.path.basename(self.db_path)

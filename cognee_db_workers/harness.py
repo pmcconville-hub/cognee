@@ -576,10 +576,28 @@ class SubprocessSession:
             timeout = self._call_timeout
         if timeout is None:
             return (None, None)
-        return (time.time() + float(timeout), float(timeout))
+        # ``time.monotonic()`` (not ``time.time()``) for deadline math: the
+        # wall clock can jump backward or forward via NTP corrections, VM
+        # suspend/resume, or clock-skew fixes, which would either fire
+        # spurious ``TimeoutError`` (clock jumped forward) or hang past the
+        # intended deadline (clock jumped backward). Monotonic time only
+        # ever increases.
+        return (time.monotonic() + float(timeout), float(timeout))
 
     def _handle_response(self, resp: Response) -> Response:
         if resp.exception is not None:
+            # The worker also formatted the remote traceback into
+            # ``resp.error``; without preserving it, the local traceback
+            # only shows the ``call()`` site and the worker-side stack
+            # frames are lost. ``add_note`` (PEP 678, Python 3.11+) is
+            # the lightest way to attach the remote stack without
+            # rewriting the exception type or chaining. Older Pythons
+            # silently skip this — the caller still gets the original
+            # exception, just without the remote traceback.
+            if resp.error and hasattr(resp.exception, "add_note"):
+                resp.exception.add_note(
+                    f"Remote subprocess traceback:\n{resp.error}"
+                )
             raise resp.exception
         if resp.error:
             raise RuntimeError(resp.error)
@@ -593,7 +611,9 @@ class SubprocessSession:
         while True:
             remaining = _PROCESS_CHECK_INTERVAL
             if deadline is not None:
-                remaining = max(0.0, min(remaining, deadline - time.time()))
+                # ``time.monotonic()`` matches the domain ``deadline`` was
+                # computed in (see ``_resolve_deadline``).
+                remaining = max(0.0, min(remaining, deadline - time.monotonic()))
                 if remaining <= 0.0:
                     # Past deadline — mark session dead so follow-up calls
                     # fail fast and the caller can rebuild an adapter.

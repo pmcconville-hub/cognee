@@ -516,3 +516,68 @@ async def test_delete_graph_waits_for_in_flight_query(kuzu_adapter):
     except asyncio.TimeoutError:  # pragma: no cover - regression signal
         delete_task.cancel()
         raise AssertionError("delete_graph did not complete after drain")
+
+
+@pytest.mark.asyncio
+async def test_close_does_not_block_event_loop_in_subprocess_mode(tmp_path):
+    """``close()`` must not freeze the event loop while
+    ``_drop_native_resources()`` issues its OP_CONN_CLOSE / OP_DB_CLOSE
+    RPCs in subprocess mode, nor while ``session.shutdown()`` does its
+    join/terminate/kill chain. Both should be offloaded via
+    ``asyncio.to_thread`` so other coroutines on the same loop continue
+    making progress.
+    """
+    import asyncio
+    import time as _time
+
+    a = create_graph_engine(
+        graph_database_provider="kuzu",
+        graph_file_path=str(tmp_path / "kuzu_subprocess_close"),
+        graph_database_subprocess_enabled=True,
+    )
+    if hasattr(a, "initialize"):
+        await a.initialize()
+
+    # Replace ``_drop_native_resources`` and ``session.shutdown`` with slow
+    # stubs so we can observe whether close() yields to the heartbeat.
+    original_drop = a._drop_native_resources
+    original_session_shutdown = a._session.shutdown
+
+    # Make ``_drop_native_resources`` deliberately slow. ``session.shutdown``
+    # is already offloaded by the surrounding fix in ``close()`` (item 12);
+    # this test specifically pins the additional offload for the drop.
+    def slow_drop():
+        _time.sleep(0.3)
+        original_drop()
+
+    def slow_session_shutdown(*args, **kwargs):
+        original_session_shutdown(*args, **kwargs)
+
+    a._drop_native_resources = slow_drop
+    a._session.shutdown = slow_session_shutdown
+
+    ticks = 0
+    stop = asyncio.Event()
+
+    async def heartbeat():
+        nonlocal ticks
+        while not stop.is_set():
+            ticks += 1
+            await asyncio.sleep(0.01)
+
+    hb_task = asyncio.create_task(heartbeat())
+    try:
+        await a.close()
+    finally:
+        stop.set()
+        await hb_task
+
+    # 300 ms slow drop. With ``asyncio.to_thread``, the heartbeat ticks
+    # every ~10 ms during the drop → expect ~30 ticks. Without the
+    # offload, the drop blocks the loop and we see ≤ 2 ticks (one before
+    # close starts, one after it returns). Threshold of 15 cleanly
+    # discriminates while leaving slack for OS-scheduler jitter.
+    assert ticks >= 15, (
+        f"event loop appears blocked during close: only {ticks} heartbeats "
+        f"during a 300ms slow drop — _drop_native_resources is not offloaded"
+    )
