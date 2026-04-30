@@ -608,3 +608,65 @@ async def test_close_is_idempotent(kuzu_adapter):
     await kuzu_adapter.close()
     # Second call should be a no-op — must not raise.
     await kuzu_adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_query_does_not_block_event_loop_during_slow_redis_acquire(
+    kuzu_adapter, monkeypatch
+):
+    """``redis_lock.acquire_lock()`` and ``release_lock()`` are sync calls
+    that do Redis I/O (default ``blocking_timeout=300s``). When invoked
+    from ``query()`` on the event-loop thread they would freeze the
+    loop. Both must be offloaded via ``asyncio.to_thread``.
+    """
+    import asyncio
+    import time as _time
+
+    from cognee.infrastructure.databases.graph.kuzu import adapter as kuzu_adapter_mod
+
+    class _SlowRedisLock:
+        def __init__(self) -> None:
+            self.acquired = False
+            self.released = False
+
+        def acquire_lock(self) -> None:
+            _time.sleep(0.3)
+            self.acquired = True
+
+        def release_lock(self) -> None:
+            self.released = True
+
+    stub = _SlowRedisLock()
+    kuzu_adapter.redis_lock = stub
+    # Force the shared-lock branch. ``cache_config`` is module-global on
+    # the adapter module; mutating its ``shared_kuzu_lock`` flag is
+    # enough to send ``query()`` down the redis-lock path.
+    monkeypatch.setattr(
+        kuzu_adapter_mod.cache_config, "shared_kuzu_lock", True
+    )
+
+    ticks = 0
+    stop = asyncio.Event()
+
+    async def heartbeat():
+        nonlocal ticks
+        while not stop.is_set():
+            ticks += 1
+            await asyncio.sleep(0.01)
+
+    hb_task = asyncio.create_task(heartbeat())
+    try:
+        await kuzu_adapter.query("MATCH (n:Node) RETURN COUNT(n)")
+    finally:
+        stop.set()
+        await hb_task
+
+    assert stub.acquired, "redis lock acquire was not invoked"
+    assert stub.released, "redis lock release was not invoked"
+    # 300 ms slow acquire. With ``asyncio.to_thread``, heartbeat ticks
+    # every ~10 ms during it → expect ~30 ticks. Without offload, the
+    # loop is frozen for the full 300 ms and ticks would be ≤ 2.
+    assert ticks >= 15, (
+        f"event loop appears blocked during query: only {ticks} heartbeats "
+        f"during a 300ms slow Redis acquire — acquire_lock is not offloaded"
+    )

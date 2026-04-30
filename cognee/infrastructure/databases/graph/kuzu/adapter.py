@@ -388,7 +388,11 @@ class KuzuAdapter(GraphDBInterface):
                     # first we race the previous Redis-lock holder that's
                     # still releasing its own native handles.
                     assert self.redis_lock is not None
-                    self.redis_lock.acquire_lock()
+                    # ``acquire_lock()`` is sync and can block on Redis I/O
+                    # for up to ``blocking_timeout`` (default 300 s) waiting
+                    # for the previous holder. Offload so we don't freeze
+                    # the event loop while another process holds the lock.
+                    await asyncio.to_thread(self.redis_lock.acquire_lock)
                     try:
                         # Increment under ``_connection_lock`` so a transient
                         # teardown waiting in ``_drain_in_flight_queries``
@@ -429,7 +433,9 @@ class KuzuAdapter(GraphDBInterface):
                                 await self._drain_in_flight_queries()
                                 self._drop_native_resources()
                     finally:
-                        self.redis_lock.release_lock()
+                        # ``release_lock()`` is also sync and does Redis
+                        # I/O — offload for symmetry with the acquire path.
+                        await asyncio.to_thread(self.redis_lock.release_lock)
                 else:
                     # Hold _connection_lock only for init + counter bookkeeping;
                     # the actual query runs unlocked so multiple queries can
