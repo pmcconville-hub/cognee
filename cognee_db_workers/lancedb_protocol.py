@@ -7,7 +7,12 @@ from __future__ import annotations
 OP_CONNECT = 100  # kwargs: url, api_key
 
 OP_TABLE_NAMES = 110  # no args; returns list[str]
-OP_CREATE_TABLE = 111  # args: (name, schema_bytes, exist_ok); schema is pickled pa.Schema
+# args: (name, schema_bytes, exist_ok). ``schema_bytes`` is Arrow IPC
+# serialized (``schema.serialize().to_pybytes()`` on the proxy side,
+# ``pa.ipc.read_schema`` on the worker side). NOT pickled — pickle.loads
+# on a subprocess RPC is an RCE surface, Arrow IPC is a typed format that
+# rejects non-schema bytes.
+OP_CREATE_TABLE = 111
 OP_OPEN_TABLE = 112  # args: (name,); returns handle
 OP_DROP_TABLE = 113  # args: (name,)
 

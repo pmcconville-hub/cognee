@@ -687,3 +687,25 @@ async def test_query_racing_with_close_does_not_leak_executor_error(kuzu_adapter
         assert "cannot schedule new futures" not in msg, (
             f"close/query race produced executor leakage: {exc!r}"
         )
+
+
+@pytest.mark.asyncio
+async def test_delete_graph_subprocess_recreates_schema(subprocess_adapter):
+    """``delete_graph`` removes the on-disk store, so the reopened DB is
+    empty and has no Node/EDGE tables. Without recreating the schema,
+    the next graph query raises "table Node does not exist". Pins the
+    ``_ensure_schema()`` call at the end of ``_reopen_subprocess_proxies``.
+    """
+    kg = _load_demo_kg()
+    await subprocess_adapter.add_nodes(kg.nodes)
+    assert await subprocess_adapter.is_empty() is False
+
+    await subprocess_adapter.delete_graph()
+
+    # Adapter must still be usable: schema exists and DB is empty.
+    assert await subprocess_adapter.is_empty() is True
+
+    # Re-add to confirm the recreated schema actually accepts writes
+    # (not just an empty SELECT against the catalog).
+    await subprocess_adapter.add_nodes(kg.nodes)
+    assert await subprocess_adapter.is_empty() is False

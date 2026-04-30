@@ -563,6 +563,11 @@ class KuzuAdapter(GraphDBInterface):
             self.connection.load_extension("JSON")
         except Exception as e:
             logger.warning(f"Could not load JSON extension after reopen: {e}")
+        # Recreate the Node/EDGE schema — ``delete_graph`` removed the
+        # on-disk store, so the worker is now talking to a fresh empty
+        # DB with no tables. Without this, the very next graph query
+        # after ``delete_graph`` raises "table Node does not exist".
+        self._ensure_schema()
 
     async def _drain_in_flight_queries(self) -> None:
         """Wait until every query that's currently mid-``run_in_executor``
