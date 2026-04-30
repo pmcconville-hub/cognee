@@ -276,9 +276,7 @@ def run_worker_loop(
             init(registry)
         resp_q.put(Response(result=_READY_SENTINEL))
     except Exception as e:
-        resp_q.put(
-            Response(error=traceback.format_exc(), exception=_safe_pickle_exception(e))
-        )
+        resp_q.put(Response(error=traceback.format_exc(), exception=_safe_pickle_exception(e)))
         return
 
     try:
@@ -298,9 +296,7 @@ def run_worker_loop(
                 if asyncio.iscoroutine(result):
                     result = loop.run_until_complete(result)
                 if isinstance(result, HandleResult):
-                    resp_q.put(
-                        Response(result=result.value, new_handle_id=result.handle_id)
-                    )
+                    resp_q.put(Response(result=result.value, new_handle_id=result.handle_id))
                 else:
                     resp_q.put(Response(result=result))
             except Exception as e:
@@ -455,15 +451,11 @@ class SubprocessSession:
         except std_queue.Empty:
             self._terminate()
             self._closed = True
-            raise SubprocessTransportError(
-                f"Subprocess init timed out after {self._init_timeout}s"
-            )
+            raise SubprocessTransportError(f"Subprocess init timed out after {self._init_timeout}s")
         if resp.error:
             self._terminate()
             self._closed = True
-            raise SubprocessTransportError(
-                f"Subprocess init failed:\n{resp.error}"
-            )
+            raise SubprocessTransportError(f"Subprocess init failed:\n{resp.error}")
         if resp.result != _READY_SENTINEL:
             self._terminate()
             self._closed = True
@@ -487,9 +479,7 @@ class SubprocessSession:
         except ValueError:
             pass
 
-    def _do_locked_call(
-        self, req: Request, deadline, effective_timeout
-    ) -> Response:
+    def _do_locked_call(self, req: Request, deadline, effective_timeout) -> Response:
         """Single RPC round trip under ``_rpc_lock``. Shared by sync and async
         entry points so the two paths can't interleave put/get on the same
         queues.
@@ -595,9 +585,7 @@ class SubprocessSession:
             # silently skip this — the caller still gets the original
             # exception, just without the remote traceback.
             if resp.error and hasattr(resp.exception, "add_note"):
-                resp.exception.add_note(
-                    f"Remote subprocess traceback:\n{resp.error}"
-                )
+                resp.exception.add_note(f"Remote subprocess traceback:\n{resp.error}")
             raise resp.exception
         if resp.error:
             raise RuntimeError(resp.error)
@@ -631,8 +619,7 @@ class SubprocessSession:
                     # proc.is_alive() each time.
                     self._closed = True
                     raise SubprocessTransportError(
-                        f"Subprocess exited unexpectedly "
-                        f"(exit code {self._proc.exitcode})"
+                        f"Subprocess exited unexpectedly (exit code {self._proc.exitcode})"
                     )
 
     def _check_alive(self) -> None:
@@ -641,8 +628,7 @@ class SubprocessSession:
         if not self._proc.is_alive():
             self._closed = True
             raise SubprocessTransportError(
-                f"Subprocess exited unexpectedly "
-                f"(exit code {self._proc.exitcode})"
+                f"Subprocess exited unexpectedly (exit code {self._proc.exitcode})"
             )
 
     def _respawn(self) -> None:

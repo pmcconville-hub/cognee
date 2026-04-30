@@ -670,3 +670,53 @@ async def test_query_does_not_block_event_loop_during_slow_redis_acquire(
         f"event loop appears blocked during query: only {ticks} heartbeats "
         f"during a 300ms slow Redis acquire — acquire_lock is not offloaded"
     )
+
+
+@pytest.mark.asyncio
+async def test_query_racing_with_close_does_not_leak_executor_error(kuzu_adapter):
+    """The race CodeRabbit flagged: ``close()`` shuts down the executor
+    while a concurrent ``query()`` is between its closed-check and its
+    ``run_in_executor`` call. With the sync ``_lifecycle_lock``,
+    ``close()`` swaps ``self.executor = None`` under the lock before
+    shutting down the *captured* executor, so query() either sees the
+    closed flag (clean RuntimeError) or captured the executor while
+    it was still live (run_in_executor completes against a stable ref).
+
+    To exercise the window, we have many query tasks racing many close
+    calls (close is idempotent). With the fix, every error surfaces as
+    the clean "KuzuAdapter is closed" RuntimeError. Without it, some
+    queries leak "cannot schedule new futures after shutdown".
+    """
+    import asyncio
+
+    # Pre-warm so subsequent queries take the lazy-init shortcut.
+    await kuzu_adapter.query("MATCH (n:Node) RETURN COUNT(n)")
+
+    n_queries = 30
+    errors_seen: list[BaseException] = []
+
+    async def fire_query():
+        try:
+            await kuzu_adapter.query("MATCH (n:Node) RETURN COUNT(n)")
+        except RuntimeError as exc:
+            errors_seen.append(exc)
+        except Exception as exc:  # pragma: no cover - any other type is a regression
+            errors_seen.append(exc)
+
+    async def fire_close():
+        # Yield once so close races against in-flight queries rather
+        # than running first.
+        await asyncio.sleep(0)
+        await kuzu_adapter.close()
+
+    tasks = [asyncio.create_task(fire_query()) for _ in range(n_queries)]
+    tasks.append(asyncio.create_task(fire_close()))
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Every error must be the clean "closed" message, never the
+    # executor's leakage.
+    for exc in errors_seen:
+        msg = str(exc)
+        assert "cannot schedule new futures" not in msg, (
+            f"close/query race produced executor leakage: {exc!r}"
+        )
