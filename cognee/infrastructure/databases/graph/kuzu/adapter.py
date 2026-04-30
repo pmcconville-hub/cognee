@@ -124,6 +124,12 @@ class KuzuAdapter(GraphDBInterface):
                 self._initialize_connection()
         self.KUZU_ASYNC_LOCK = asyncio.Lock()
         self._connection_lock = asyncio.Lock()
+        # Set when ``open_connections == 0``; used by transient teardown
+        # paths (e.g. ``delete_graph``) to wait for in-flight queries to
+        # finish before dropping native resources. ``close()`` does NOT use
+        # this — see ``close()``'s docstring for the cross-loop reason.
+        self._all_queries_drained = asyncio.Event()
+        self._all_queries_drained.set()
 
     def _ensure_schema(self) -> None:
         """Create Node + EDGE tables on the current ``self.connection``.
@@ -351,9 +357,14 @@ class KuzuAdapter(GraphDBInterface):
                     assert self.redis_lock is not None
                     self.redis_lock.acquire_lock()
                     try:
+                        # Increment under ``_connection_lock`` so a transient
+                        # teardown waiting in ``_drain_in_flight_queries``
+                        # can't see ``open_connections == 0`` between the
+                        # lock release and our increment.
                         async with self._connection_lock:
                             connection = self.get_or_init_connection()
-                        self.open_connections += 1
+                            self.open_connections += 1
+                            self._all_queries_drained.clear()
                         logger.info(f"Open connections after open: {self.open_connections}")
                         try:
                             result = await loop.run_in_executor(
@@ -361,24 +372,41 @@ class KuzuAdapter(GraphDBInterface):
                             )
                         finally:
                             self.open_connections -= 1
+                            if self.open_connections == 0:
+                                self._all_queries_drained.set()
                             logger.info(
                                 f"Open connections after close: {self.open_connections}"
                             )
                             # Drop native handles BEFORE releasing the Redis
                             # lock so the next holder can take the on-disk
-                            # file lock without fighting us.
+                            # file lock without fighting us. Drain first for
+                            # symmetry with ``delete_graph``: the redis lock
+                            # already serializes us in practice, but the
+                            # drain costs nothing here (we just decremented
+                            # to zero) and stays correct under any future
+                            # change to redis-lock reentrancy.
                             async with self._connection_lock:
+                                await self._drain_in_flight_queries()
                                 self._drop_native_resources()
                     finally:
                         self.redis_lock.release_lock()
                 else:
-                    # Hold _connection_lock only for initialization, not for
-                    # the full query execution.
+                    # Hold _connection_lock only for init + counter bookkeeping;
+                    # the actual query runs unlocked so multiple queries can
+                    # execute concurrently. Counter increment must be inside
+                    # the lock so ``_drain_in_flight_queries`` can't miss us.
                     async with self._connection_lock:
                         connection = self.get_or_init_connection()
-                    result = await loop.run_in_executor(
-                        self.executor, blocking_query, connection
-                    )
+                        self.open_connections += 1
+                        self._all_queries_drained.clear()
+                    try:
+                        result = await loop.run_in_executor(
+                            self.executor, blocking_query, connection
+                        )
+                    finally:
+                        self.open_connections -= 1
+                        if self.open_connections == 0:
+                            self._all_queries_drained.set()
 
                 otel_span.set_attribute(COGNEE_DB_ROW_COUNT, len(result))
                 return result
@@ -431,6 +459,21 @@ class KuzuAdapter(GraphDBInterface):
                 logger.warning(f"Error closing Kuzu database: {e}")
             self.db = None
 
+    async def _drain_in_flight_queries(self) -> None:
+        """Wait until every query that's currently mid-``run_in_executor``
+        has finished. The caller MUST hold ``_connection_lock`` so new
+        queries can't start while we wait — otherwise the drain would
+        race a fresh increment.
+
+        Used by transient-teardown paths (currently ``delete_graph`` and
+        the shared-lock per-query cleanup) so ``_drop_native_resources``
+        doesn't tear out a connection an executor thread is still using.
+        ``close()`` does NOT use this — see its docstring for why
+        (cross-loop ``asyncio.Event.wait()`` would raise).
+        """
+        while self.open_connections > 0:
+            await self._all_queries_drained.wait()
+
     async def close(self):
         """Permanently close the adapter, releasing native resources and (in
         subprocess mode) shutting down the worker process.
@@ -449,6 +492,11 @@ class KuzuAdapter(GraphDBInterface):
         ``self.connection`` while an executor thread is still mid-
         ``connection.execute``; (b) reaps the executor threads that would
         otherwise leak on every LRU eviction.
+
+        Note: transient-teardown paths (``delete_graph``) use the asyncio
+        ``_drain_in_flight_queries`` helper instead, but that's not safe
+        from a foreign loop — ``executor.shutdown(wait=True)`` is the
+        cross-loop equivalent and the only correct choice here.
         """
         executor = getattr(self, "executor", None)
         if executor is not None:
@@ -2182,8 +2230,14 @@ class KuzuAdapter(GraphDBInterface):
             # Transient drop: release the file handles so we can delete the
             # db files, but do NOT latch ``_permanently_closed`` — callers
             # expect to keep using this adapter after ``delete_graph`` and
-            # have the store lazily reinitialize.
+            # have the store lazily reinitialize. Drain in-flight queries
+            # under ``_connection_lock`` so we don't tear out a Connection
+            # an executor thread is still using (the query path releases
+            # ``_connection_lock`` before ``run_in_executor`` so multiple
+            # queries can run concurrently — the lock alone wouldn't block
+            # us against them).
             async with self._connection_lock:
+                await self._drain_in_flight_queries()
                 self._drop_native_resources()
 
             db_dir = os.path.dirname(self.db_path)

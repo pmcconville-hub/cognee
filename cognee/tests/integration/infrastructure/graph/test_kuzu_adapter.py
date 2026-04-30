@@ -462,3 +462,57 @@ async def test_subprocess_calls_after_close_raise(subprocess_adapter):
     await subprocess_adapter.close()
     with pytest.raises(RuntimeError):
         await subprocess_adapter.query("MATCH (n) RETURN n")
+
+
+# ---------------------------------------------------------------------------
+# delete_graph drains in-flight queries before dropping native resources
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_delete_graph_waits_for_in_flight_query(kuzu_adapter):
+    """``delete_graph()`` must not tear down ``self.connection`` while an
+    executor thread is mid-``blocking_query``. White-box: claim an
+    ``open_connections`` slot directly to simulate an in-flight query,
+    fire ``delete_graph`` on a separate task, and assert it parks until
+    the slot is released.
+    """
+    import asyncio
+
+    # Force ``open_connections > 0`` while ``delete_graph`` runs by
+    # claiming a slot directly — equivalent to a query that's parked
+    # inside ``run_in_executor`` but without needing to stub the executor.
+    async with kuzu_adapter._connection_lock:
+        kuzu_adapter.open_connections += 1
+        kuzu_adapter._all_queries_drained.clear()
+
+    delete_started = asyncio.Event()
+    delete_finished = asyncio.Event()
+
+    async def run_delete():
+        delete_started.set()
+        await kuzu_adapter.delete_graph()
+        delete_finished.set()
+
+    delete_task = asyncio.create_task(run_delete())
+
+    # Give the delete a chance to enter ``_drain_in_flight_queries``.
+    await delete_started.wait()
+    await asyncio.sleep(0.05)
+
+    # delete_graph must still be parked: connection NOT yet dropped.
+    assert not delete_finished.is_set(), (
+        "delete_graph completed while open_connections > 0 — drain is broken"
+    )
+
+    # Release the simulated in-flight query.
+    kuzu_adapter.open_connections -= 1
+    if kuzu_adapter.open_connections == 0:
+        kuzu_adapter._all_queries_drained.set()
+
+    # Now delete_graph should wake up and complete promptly.
+    try:
+        await asyncio.wait_for(delete_task, timeout=5.0)
+    except asyncio.TimeoutError:  # pragma: no cover - regression signal
+        delete_task.cancel()
+        raise AssertionError("delete_graph did not complete after drain")
