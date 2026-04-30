@@ -369,8 +369,14 @@ def collect_garbage_in_all_workers(timeout: float = 5.0) -> int:
                 continue
             session.touch()
             session._req_q.put(Request(op=OP_GC_COLLECT))
-            deadline, effective_timeout = session._resolve_deadline(timeout)
-            resp = session._wait_response(deadline, effective_timeout)
+            # Direct queue read with a bounded timeout — NOT
+            # ``_wait_response``: that helper flips
+            # ``session._closed = True`` on timeout, which would
+            # silently brick a perfectly healthy session whose GC pass
+            # just happened to overrun this best-effort budget. Empty
+            # / pickle errors are caught by the broad except below.
+            t = timeout if timeout is not None else 5.0
+            resp = session._resp_q.get(timeout=t)
             session._handle_response(resp)
             collected += 1
         except Exception:

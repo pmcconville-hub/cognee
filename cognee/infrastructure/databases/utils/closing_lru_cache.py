@@ -119,27 +119,43 @@ class ClosingLRUCache:
 
         value = factory()
 
+        # Decide outcome under the lock; defer ``_close_value`` until
+        # after release. ``_close_value`` can run arbitrary user code
+        # (sync ``close()``, ``asyncio.run`` for an async ``close()``,
+        # logging) and even re-enter cache creation in some adapter
+        # close paths — running it under ``self._lock`` would either
+        # stall every cache user or deadlock outright.
+        loser_value = None
+        evicted_value = None
         with self._lock:
             # Re-check after releasing lock — another thread may have created it.
             if key in self._cache:
                 self._cache.move_to_end(key)
-                _close_value(value)
-                return self._cache[key]
+                loser_value = value
+                cached = self._cache[key]
+            else:
+                # ``None`` means unbounded — skip the eviction check entirely.
+                if self._maxsize is not None and len(self._cache) >= self._maxsize:
+                    _, evicted_value = self._cache.popitem(last=False)
+                self._cache[key] = value
+                cached = value
 
-            # ``None`` means unbounded — skip the eviction check entirely.
-            if self._maxsize is not None and len(self._cache) >= self._maxsize:
-                _, evicted = self._cache.popitem(last=False)
-                _close_value(evicted)
-
-            self._cache[key] = value
-            return value
+        if loser_value is not None:
+            _close_value(loser_value)
+        if evicted_value is not None:
+            _close_value(evicted_value)
+        return cached
 
     def cache_clear(self):
         """Close and remove all cached entries."""
+        # Capture the values under the lock; close them after release so
+        # arbitrary close() code can't stall every cache user (or
+        # deadlock by re-entering cache creation).
         with self._lock:
-            for value in self._cache.values():
-                _close_value(value)
+            values = list(self._cache.values())
             self._cache.clear()
+        for value in values:
+            _close_value(value)
 
     def cache_info(self):
         """Return current size and max size."""

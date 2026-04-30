@@ -36,7 +36,7 @@ class KuzuSubprocessSession(SubprocessSession):
     """
 
     @classmethod
-    def start(cls, *, max_retries: int = 2) -> "KuzuSubprocessSession":
+    def start(cls, *, max_retries: Optional[int] = None) -> "KuzuSubprocessSession":
         ctx = mp.get_context("spawn")
 
         def _spawn():
@@ -52,13 +52,14 @@ class KuzuSubprocessSession(SubprocessSession):
             return proc, req_q, resp_q
 
         proc, req_q, resp_q = _spawn()
-        session = cls(
-            proc,
-            req_q,
-            resp_q,
-            respawn_factory=_spawn,
-            max_retries=max_retries,
-        )
+        # Forward ``max_retries`` only when explicitly set so the
+        # ``SUBPROCESS_MAX_RETRIES`` env var (read by
+        # ``SubprocessSession.__init__``) takes effect when the caller
+        # doesn't override.
+        kwargs: Dict[str, Any] = {"respawn_factory": _spawn}
+        if max_retries is not None:
+            kwargs["max_retries"] = max_retries
+        session = cls(proc, req_q, resp_q, **kwargs)
         try:
             session.wait_for_ready()
         except Exception:

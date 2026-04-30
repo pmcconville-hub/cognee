@@ -535,6 +535,36 @@ class KuzuAdapter(GraphDBInterface):
                 logger.warning(f"Error closing Kuzu database: {e}")
             self.db = None
 
+    def _reopen_subprocess_proxies(self) -> None:
+        """Recreate ``self.db`` + ``self.connection`` against the existing
+        ``self._session`` after a transient drop (``delete_graph``).
+
+        Subprocess mode only — local mode re-inits lazily in
+        ``_initialize_connection`` from the next ``get_or_init_connection``
+        call. Sync method (called via ``asyncio.to_thread`` from the
+        async caller because the proxy constructors issue blocking RPCs
+        through the session).
+        """
+        # Imported here to avoid a top-level cycle with the proxy module.
+        from .subprocess.proxy import RemoteKuzuConnection, RemoteKuzuDatabase
+
+        self.db = RemoteKuzuDatabase(
+            self._session,
+            db_path=self.db_path,
+            buffer_pool_size=self.kuzu_buffer_pool_size,
+            max_num_threads=self.kuzu_num_threads,
+            max_db_size=self.kuzu_max_db_size,
+        )
+        self.db.init_database()
+        self.connection = RemoteKuzuConnection(self._session, self.db)
+        # Re-load the JSON extension on the fresh connection — the
+        # original setup path did this and queries that touch JSON would
+        # otherwise fail with "extension not loaded" after delete_graph.
+        try:
+            self.connection.load_extension("JSON")
+        except Exception as e:
+            logger.warning(f"Could not load JSON extension after reopen: {e}")
+
     async def _drain_in_flight_queries(self) -> None:
         """Wait until every query that's currently mid-``run_in_executor``
         has finished. The caller MUST hold ``_connection_lock`` so new
@@ -2375,6 +2405,17 @@ class KuzuAdapter(GraphDBInterface):
                 await file_storage.remove_all(db_name)
 
             logger.info(f"Deleted Kuzu database files at {self.db_path}")
+
+            # In subprocess mode ``get_or_init_connection`` refuses to
+            # rebuild proxies (it has no kwargs to drive a fresh
+            # ``RemoteKuzuDatabase``), so the next query would raise
+            # "subprocess session is gone". Reopen here using the
+            # original tuning + the surviving ``self._session`` so
+            # callers can keep using the adapter after ``delete_graph``.
+            # Local mode lazily re-inits via ``_initialize_connection``
+            # on next query, so no work needed here.
+            if self._subprocess_mode and self._session is not None:
+                await asyncio.to_thread(self._reopen_subprocess_proxies)
 
         except Exception as e:
             logger.error(f"Failed to delete graph data: {e}")
