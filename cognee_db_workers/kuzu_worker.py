@@ -87,9 +87,7 @@ def _conn_execute_fetch_all(registry: HandleRegistry, req: Request):
     try:
         while result.has_next():
             raw = result.get_next()
-            rows.append(
-                tuple(cell.as_py() if hasattr(cell, "as_py") else cell for cell in raw)
-            )
+            rows.append(tuple(cell.as_py() if hasattr(cell, "as_py") else cell for cell in raw))
     finally:
         # Kuzu's Python QueryResult is auto-closed on GC; explicit close is a
         # safety net when available.

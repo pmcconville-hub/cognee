@@ -120,9 +120,7 @@ def _wait_for_worker_exit(session, timeout: float = 5.0) -> None:
     deadline = time.time() + timeout
     while session._proc.is_alive() and time.time() < deadline:
         time.sleep(0.05)
-    assert not session._proc.is_alive(), (
-        f"worker did not exit within {timeout}s"
-    )
+    assert not session._proc.is_alive(), f"worker did not exit within {timeout}s"
 
 
 def _start_session(target=_worker_main, **kwargs) -> SubprocessSession:
@@ -157,7 +155,9 @@ def _start_retryable_session(
 
     proc, req_q, resp_q = _spawn()
     session = SubprocessSession(
-        proc, req_q, resp_q,
+        proc,
+        req_q,
+        resp_q,
         respawn_factory=_spawn,
         max_retries=max_retries,
         init_timeout=init_timeout,
@@ -208,9 +208,7 @@ def test_picklable_worker_exception_carries_remote_traceback():
             assert "Remote subprocess traceback:" in joined, (
                 "remote traceback annotation missing from exception notes"
             )
-            assert "_layer_b" in joined, (
-                "remote traceback should include worker-side stack frames"
-            )
+            assert "_layer_b" in joined, "remote traceback should include worker-side stack frames"
     finally:
         session.shutdown()
 
@@ -256,9 +254,7 @@ def test_init_failure_propagates():
     ctx = mp.get_context("spawn")
     req_q = ctx.Queue()
     resp_q = ctx.Queue()
-    proc = ctx.Process(
-        target=_failing_init_worker, args=(req_q, resp_q), daemon=True
-    )
+    proc = ctx.Process(target=_failing_init_worker, args=(req_q, resp_q), daemon=True)
     with spawn_without_main():
         proc.start()
     session = SubprocessSession(proc, req_q, resp_q, init_timeout=5.0)
@@ -365,9 +361,7 @@ def test_retry_gives_up_after_max_retries():
         def _stillborn_spawn():
             req_q = ctx.Queue()
             resp_q = ctx.Queue()
-            proc = ctx.Process(
-                target=_stillborn_worker, args=(req_q, resp_q), daemon=True
-            )
+            proc = ctx.Process(target=_stillborn_worker, args=(req_q, resp_q), daemon=True)
             with spawn_without_main():
                 proc.start()
             return proc, req_q, resp_q
@@ -416,9 +410,7 @@ def test_replay_steps_fire_on_respawn():
             replay_invocations.append("fired")
             return Request(op=OP_ECHO, args=("replay-run",))
 
-        session.add_replay_step(
-            ReplayStep(make_request=_make_replay_req, apply_new_handle=None)
-        )
+        session.add_replay_step(ReplayStep(make_request=_make_replay_req, apply_new_handle=None))
 
         session._proc.kill()
         _wait_for_worker_exit(session)
@@ -451,9 +443,7 @@ async def test_kuzu_adapter_survives_worker_sigkill(tmp_path):
     )
     try:
         # Sanity: create a table + insert.
-        await adapter.query(
-            "CREATE NODE TABLE IF NOT EXISTS N(id STRING PRIMARY KEY, name STRING)"
-        )
+        await adapter.query("CREATE NODE TABLE IF NOT EXISTS N(id STRING PRIMARY KEY, name STRING)")
         await adapter.query(
             "CREATE (:N {id: $id, name: $name})",
             {"id": "a", "name": "Alice"},
@@ -490,9 +480,7 @@ async def test_lancedb_table_handle_release(tmp_path):
 
     session = LanceDBSubprocessSession.start()
     try:
-        conn = RemoteLanceDBConnection(
-            session, url=str(tmp_path / "lance"), api_key=None
-        )
+        conn = RemoteLanceDBConnection(session, url=str(tmp_path / "lance"), api_key=None)
         await conn.connect()
         schema = pa.schema(
             [
@@ -571,11 +559,7 @@ async def test_lancedb_connection_concurrent_connect_registers_one_replay_step(t
         # should do the real work; the rest must be no-ops.
         await _asyncio.gather(*(conn.connect() for _ in range(16)))
 
-        connect_steps = [
-            s
-            for s in session._replay_steps
-            if s.make_request().op == OP_CONNECT
-        ]
+        connect_steps = [s for s in session._replay_steps if s.make_request().op == OP_CONNECT]
         assert len(connect_steps) == 1, (
             f"expected exactly one OP_CONNECT replay step, got {len(connect_steps)} — "
             f"concurrent connect() calls are not properly serialized"
@@ -603,9 +587,7 @@ async def test_lancedb_table_async_with_releases_handle(tmp_path):
     try:
         conn = RemoteLanceDBConnection(session, url=str(tmp_path / "lance"), api_key=None)
         await conn.connect()
-        schema = pa.schema(
-            [("id", pa.string()), ("vector", pa.list_(pa.float32(), 4))]
-        )
+        schema = pa.schema([("id", pa.string()), ("vector", pa.list_(pa.float32(), 4))])
         async with await conn.create_table("t", schema=schema, exist_ok=True) as t:
             assert t.handle_id is not None
         # Block-exit must have released the handle.
@@ -631,9 +613,7 @@ async def test_lancedb_table_sync_with_releases_handle(tmp_path):
     try:
         conn = RemoteLanceDBConnection(session, url=str(tmp_path / "lance"), api_key=None)
         await conn.connect()
-        schema = pa.schema(
-            [("id", pa.string()), ("vector", pa.list_(pa.float32(), 4))]
-        )
+        schema = pa.schema([("id", pa.string()), ("vector", pa.list_(pa.float32(), 4))])
         t = await conn.create_table("t", schema=schema, exist_ok=True)
         with t:
             assert t.handle_id is not None

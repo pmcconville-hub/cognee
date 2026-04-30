@@ -56,7 +56,9 @@ class LanceDBSubprocessSession(SubprocessSession):
 
         proc, req_q, resp_q = _spawn()
         session = cls(
-            proc, req_q, resp_q,
+            proc,
+            req_q,
+            resp_q,
             respawn_factory=_spawn,
             max_retries=max_retries,
         )
@@ -78,8 +80,13 @@ class _BuilderChain:
     RPC on the terminal method.
     """
 
-    def __init__(self, session: LanceDBSubprocessSession, table_handle_id: int,
-                 op_code: int, root_args: tuple):
+    def __init__(
+        self,
+        session: LanceDBSubprocessSession,
+        table_handle_id: int,
+        op_code: int,
+        root_args: tuple,
+    ):
         self._session = session
         self._table_handle_id = table_handle_id
         self._op_code = op_code
@@ -210,9 +217,7 @@ class RemoteLanceDBTable:
         self._handle_id = None
         self._deregister_replay()
         try:
-            await self._session.call_async(
-                Request(op=OP_TABLE_RELEASE, handle_id=hid)
-            )
+            await self._session.call_async(Request(op=OP_TABLE_RELEASE, handle_id=hid))
         except Exception:
             # Session already torn down; the handle dies with the worker.
             pass
@@ -358,7 +363,9 @@ class RemoteLanceDBConnection:
         resp = await self._session.call_async(Request(op=OP_TABLE_NAMES))
         return list(resp.result or [])
 
-    async def create_table(self, name: str, schema: pa.Schema, exist_ok: bool = True) -> "RemoteLanceDBTable":
+    async def create_table(
+        self, name: str, schema: pa.Schema, exist_ok: bool = True
+    ) -> "RemoteLanceDBTable":
         await self._ensure_connected()
         schema_bytes = pickle.dumps(schema)
         await self._session.call_async(

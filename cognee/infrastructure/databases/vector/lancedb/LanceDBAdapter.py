@@ -196,8 +196,7 @@ class LanceDBAdapter(VectorDBInterface):
                             await asyncio.to_thread(session.shutdown)
                         except Exception as teardown_err:
                             logger.warning(
-                                "Error shutting down LanceDB subprocess after "
-                                "connect failure: %s",
+                                "Error shutting down LanceDB subprocess after connect failure: %s",
                                 teardown_err,
                             )
                     raise
@@ -417,9 +416,7 @@ class LanceDBAdapter(VectorDBInterface):
 
         # Reuse the cached LanceDataPoint class rather than mint a new
         # ``MigrationLanceDataPoint`` class per migration call.
-        MigrationLanceDataPoint = self._make_lance_datapoint_cls(
-            schema_model, vector_size
-        )
+        MigrationLanceDataPoint = self._make_lance_datapoint_cls(schema_model, vector_size)
 
         new_ids = {dp.id for dp in new_lance_data_points}
         typed_old_rows = []

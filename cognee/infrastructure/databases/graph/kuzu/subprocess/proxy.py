@@ -53,7 +53,9 @@ class KuzuSubprocessSession(SubprocessSession):
 
         proc, req_q, resp_q = _spawn()
         session = cls(
-            proc, req_q, resp_q,
+            proc,
+            req_q,
+            resp_q,
             respawn_factory=_spawn,
             max_retries=max_retries,
         )
@@ -206,9 +208,7 @@ class RemoteKuzuConnection:
     def __init__(self, session: KuzuSubprocessSession, database: RemoteKuzuDatabase) -> None:
         self._session = session
         self._database = database
-        resp = session.call(
-            Request(op=OP_OPEN_CONNECTION, args=(database.handle_id,))
-        )
+        resp = session.call(Request(op=OP_OPEN_CONNECTION, args=(database.handle_id,)))
         self._handle_id: Optional[int] = resp.new_handle_id
         # Tracks replay steps THIS proxy registered (one for the
         # connection itself + one per loaded extension). ``close()``
@@ -233,9 +233,7 @@ class RemoteKuzuConnection:
 
     def _register_replay(self) -> None:
         step = ReplayStep(
-            make_request=lambda: Request(
-                op=OP_OPEN_CONNECTION, args=(self._database.handle_id,)
-            ),
+            make_request=lambda: Request(op=OP_OPEN_CONNECTION, args=(self._database.handle_id,)),
             apply_new_handle=self._apply_new_conn_handle,
         )
         self._session.add_replay_step(step)
@@ -259,9 +257,7 @@ class RemoteKuzuConnection:
         return _Materialized(rows)
 
     def load_extension(self, name: str) -> None:
-        self._session.call(
-            Request(op=OP_LOAD_EXTENSION, handle_id=self.handle_id, args=(name,))
-        )
+        self._session.call(Request(op=OP_LOAD_EXTENSION, handle_id=self.handle_id, args=(name,)))
         # Replay the same extension load on any fresh connection.
         step = ReplayStep(
             make_request=lambda name=name: Request(

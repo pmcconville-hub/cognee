@@ -73,7 +73,9 @@ def _relax_nullability(schema):
             )
         if pa.types.is_list(arrow_type):
             return pa.list_(
-                pa.field(arrow_type.value_field.name, _relax_type(arrow_type.value_type), nullable=True)
+                pa.field(
+                    arrow_type.value_field.name, _relax_type(arrow_type.value_type), nullable=True
+                )
             )
         if pa.types.is_fixed_size_list(arrow_type):
             return pa.list_(
@@ -162,7 +164,9 @@ def _apply_chain(builder, chain_steps):
     return builder
 
 
-async def _run_builder(table, root_args, chain_steps, terminal_name, terminal_args, terminal_kwargs, root_method: str):
+async def _run_builder(
+    table, root_args, chain_steps, terminal_name, terminal_args, terminal_kwargs, root_method: str
+):
     builder = getattr(table, root_method)(*root_args)
     builder = _apply_chain(builder, chain_steps)
     terminal = getattr(builder, terminal_name)(*terminal_args, **terminal_kwargs)
@@ -178,9 +182,7 @@ async def _run_builder(table, root_args, chain_steps, terminal_name, terminal_ar
 async def _op_query_execute(registry: HandleRegistry, req: Request):
     table = registry.get(req.handle_id)
     root_args, chain, terminal_name, t_args, t_kwargs = req.args
-    return await _run_builder(
-        table, root_args, chain, terminal_name, t_args, t_kwargs, "query"
-    )
+    return await _run_builder(table, root_args, chain, terminal_name, t_args, t_kwargs, "query")
 
 
 async def _op_vector_search_execute(registry: HandleRegistry, req: Request):

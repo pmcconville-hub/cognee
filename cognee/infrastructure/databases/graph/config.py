@@ -60,9 +60,7 @@ class GraphConfig(BaseSettings):
 
     # Kuzu tuning. 0 means "use Kuzu's default" (one thread per CPU).
     kuzu_num_threads: int = Field(0, env="KUZU_NUM_THREADS")
-    kuzu_buffer_pool_size: int = Field(
-        DEFAULT_KUZU_BUFFER_POOL_SIZE, env="KUZU_BUFFER_POOL_SIZE"
-    )
+    kuzu_buffer_pool_size: int = Field(DEFAULT_KUZU_BUFFER_POOL_SIZE, env="KUZU_BUFFER_POOL_SIZE")
     kuzu_max_db_size: int = Field(DEFAULT_KUZU_MAX_DB_SIZE, env="KUZU_MAX_DB_SIZE")
 
     model_config = SettingsConfigDict(env_file=".env", extra="allow", populate_by_name=True)
