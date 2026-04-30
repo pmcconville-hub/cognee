@@ -152,6 +152,11 @@ class AddCognifySearchFlow(SequentialTaskSet):
     def _headers(self) -> dict:
         return {
             "X-Api-Key": self.api_key,
+        }
+
+    def _json_headers(self) -> dict:
+        return {
+            "X-Api-Key": self.api_key,
             "Content-Type": "application/json",
         }
 
@@ -195,7 +200,7 @@ class AddCognifySearchFlow(SequentialTaskSet):
         with self.client.post(
             "/api/v1/cognify",
             json=payload,
-            headers=self._headers(),
+            headers=self._json_headers(),
             name="/api/v1/cognify",
             catch_response=True,
             timeout=300,
@@ -215,9 +220,9 @@ class AddCognifySearchFlow(SequentialTaskSet):
             "datasets": [self.dataset_name],
         }
         with self.client.post(
-            "/api/search",
+            "/api/v1/search",
             json=payload,
-            headers=self._headers(),
+            headers=self._json_headers(),
             name="/api/v1/search",
             catch_response=True,
             timeout=120,
@@ -346,6 +351,8 @@ if __name__ == "__main__":
 
         # Run locust command
         cmd = [
+            sys.executable,
+            "-m",
             "locust",
             "-f",
             __file__,
@@ -357,6 +364,11 @@ if __name__ == "__main__":
             html_result_location,
             "--logfile",
             locust_log_location,
+            "--headless",
+            "-u",
+            "10",
+            "-r",
+            "1",
             "--run-time",
             "5m",
             *sys.argv[1:],
