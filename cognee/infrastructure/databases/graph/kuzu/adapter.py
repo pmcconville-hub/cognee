@@ -169,7 +169,11 @@ class KuzuAdapter(GraphDBInterface):
         the native db/connection are constructed by the factory) can still run
         the same schema bootstrap.
         """
-        assert self.connection is not None
+        # Explicit check rather than ``assert`` — assertions are stripped
+        # under ``python -O``, which would turn this into a confusing
+        # ``AttributeError`` on the next line instead of a clear message.
+        if self.connection is None:
+            raise RuntimeError("Kuzu connection is not initialized; cannot ensure schema.")
         self.connection.execute("""
             CREATE NODE TABLE IF NOT EXISTS Node(
                 id STRING PRIMARY KEY,

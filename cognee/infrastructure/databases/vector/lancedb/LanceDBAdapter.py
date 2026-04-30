@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import threading
+from collections import OrderedDict
 from os import path
 from uuid import UUID
 from enum import Enum
@@ -88,8 +89,16 @@ class LanceDBAdapter(VectorDBInterface):
     # ``create_data_points`` mints a brand-new class for every data point,
     # and those classes are never collected — the tracemalloc profile on a
     # 2-cycle run showed +5550 FieldInfo and +879 ModelMetaclass per cycle.
-    _payload_schema_cache: dict = {}
-    _lance_datapoint_class_cache: dict = {}
+    #
+    # Bounded LRUs (cap 256). An unbounded dict would itself become a
+    # memory-growth source if callers create many distinct DataPoint /
+    # vector-size pairs over a long-running process — defeating the very
+    # leak the cache is here to fix.
+    _PAYLOAD_SCHEMA_CACHE_SIZE = 256
+    _LANCE_DATAPOINT_CACHE_SIZE = 256
+    _payload_schema_cache: "OrderedDict" = OrderedDict()
+    _lance_datapoint_class_cache: "OrderedDict" = OrderedDict()
+    _lance_cache_lock = threading.Lock()
 
     def __init__(
         self,
@@ -908,11 +917,20 @@ class LanceDBAdapter(VectorDBInterface):
         (which pydantic's SchemaValidator / SchemaSerializer cache would
         otherwise accumulate indefinitely).
         """
-        cached = self._payload_schema_cache.get(model_type)
-        if cached is not None:
-            return cached
+        with self._lance_cache_lock:
+            cached = self._payload_schema_cache.get(model_type)
+            if cached is not None:
+                self._payload_schema_cache.move_to_end(model_type)
+                return cached
         cached = self._build_data_point_schema(model_type)
-        self._payload_schema_cache[model_type] = cached
+        with self._lance_cache_lock:
+            existing = self._payload_schema_cache.get(model_type)
+            if existing is not None:
+                self._payload_schema_cache.move_to_end(model_type)
+                return existing
+            self._payload_schema_cache[model_type] = cached
+            if len(self._payload_schema_cache) > self._PAYLOAD_SCHEMA_CACHE_SIZE:
+                self._payload_schema_cache.popitem(last=False)
         return cached
 
     @classmethod
@@ -923,16 +941,25 @@ class LanceDBAdapter(VectorDBInterface):
         LanceModel subclass on every insert.
         """
         key = (payload_schema, int(vector_size))
-        cached = cls._lance_datapoint_class_cache.get(key)
-        if cached is not None:
-            return cached
+        with cls._lance_cache_lock:
+            cached = cls._lance_datapoint_class_cache.get(key)
+            if cached is not None:
+                cls._lance_datapoint_class_cache.move_to_end(key)
+                return cached
 
         class LanceDataPoint(LanceModel):
             id: str
             vector: Vector(vector_size)
             payload: payload_schema
 
-        cls._lance_datapoint_class_cache[key] = LanceDataPoint
+        with cls._lance_cache_lock:
+            existing = cls._lance_datapoint_class_cache.get(key)
+            if existing is not None:
+                cls._lance_datapoint_class_cache.move_to_end(key)
+                return existing
+            cls._lance_datapoint_class_cache[key] = LanceDataPoint
+            if len(cls._lance_datapoint_class_cache) > cls._LANCE_DATAPOINT_CACHE_SIZE:
+                cls._lance_datapoint_class_cache.popitem(last=False)
         return LanceDataPoint
 
     def _build_data_point_schema(self, model_type: BaseModel):

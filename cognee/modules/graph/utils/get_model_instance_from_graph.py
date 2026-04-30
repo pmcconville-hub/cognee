@@ -38,8 +38,17 @@ def _extended_model_for(base_type, field_specs):
         if cached is not None:
             _EXTENDED_MODEL_CACHE.move_to_end(key)
             return cached
+    # ``frozenset`` iteration order is non-deterministic; sort to a
+    # stable order so the resulting pydantic model's field order (and
+    # ``model_dump()`` output) is reproducible run-to-run. The cache
+    # key remains the order-independent ``frozenset`` so the same set
+    # of fields always hits the same cache entry.
+    ordered_specs = sorted(
+        spec_key,
+        key=lambda spec: (spec[0], repr(spec[1]), spec[2]),
+    )
     field_defs = {}
-    for edge_label, target_type, is_list in spec_key:
+    for edge_label, target_type, is_list in ordered_specs:
         annotation = list[target_type] if is_list else target_type
         field_defs[edge_label] = (annotation, PydanticUndefined)
     model = copy_model(base_type, field_defs)
