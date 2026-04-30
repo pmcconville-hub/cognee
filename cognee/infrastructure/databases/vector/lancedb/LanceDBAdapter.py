@@ -125,6 +125,14 @@ class LanceDBAdapter(VectorDBInterface):
                 "LanceDBAdapter requires both `connection` and `session` "
                 "in subprocess mode, or neither in local mode."
             )
+        # ``url`` is typed ``Optional[str]`` so callers can pass ``None``
+        # in subprocess-proxy mode (the ``RemoteLanceDBConnection``
+        # carries the real URL). In local mode the URL drives every
+        # connection / file operation, so reject ``None`` up front
+        # instead of crashing on the first ``connect_async`` /
+        # ``prune`` call with a confusing ``AttributeError``.
+        if connection is None and url is None:
+            raise ValueError("LanceDBAdapter local mode requires a non-None `url`.")
         self.url = url
         self.api_key = api_key
         self.embedding_engine = embedding_engine
