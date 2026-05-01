@@ -1,5 +1,7 @@
 """Tests for ClosingLRUCache and the @closing_lru_cache decorator."""
 
+import gc
+
 from cognee.infrastructure.databases.utils.closing_lru_cache import (
     ClosingLRUCache,
     closing_lru_cache,
@@ -33,6 +35,14 @@ class _NotCloseable:
 
     def __init__(self, name=""):
         self.name = name
+
+
+class _AsyncWorker(_Closeable):
+    async def ping(self):
+        import asyncio
+
+        await asyncio.sleep(0)
+        return self.closed
 
 
 # -- ClosingLRUCache: basic caching -----------------------------------------
@@ -69,14 +79,18 @@ def test_cache_info_reports_size_and_maxsize():
 
 
 def test_evicts_oldest_and_calls_close():
-    """When maxsize is exceeded, the oldest entry is evicted and closed."""
+    """Evicted leased entries close after the returned proxy is released."""
     cache = ClosingLRUCache(maxsize=2)
     a = cache.get_or_create("a", lambda: _Closeable("a"))
+    a_raw = a.__wrapped__
     cache.get_or_create("b", lambda: _Closeable("b"))
     cache.get_or_create("c", lambda: _Closeable("c"))
 
-    assert a.closed is True
+    assert a.closed is False
     assert cache.cache_info()["size"] == 2
+    del a
+    gc.collect()
+    assert a_raw.closed is True
 
 
 def test_access_refreshes_lru_order():
@@ -84,6 +98,7 @@ def test_access_refreshes_lru_order():
     cache = ClosingLRUCache(maxsize=2)
     a = cache.get_or_create("a", lambda: _Closeable("a"))
     b = cache.get_or_create("b", lambda: _Closeable("b"))
+    b_raw = b.__wrapped__
 
     # Access "a" to refresh it
     cache.get_or_create("a", lambda: _Closeable("should not create"))
@@ -92,7 +107,10 @@ def test_access_refreshes_lru_order():
     cache.get_or_create("c", lambda: _Closeable("c"))
 
     assert a.closed is False
-    assert b.closed is True
+    assert b.closed is False
+    del b
+    gc.collect()
+    assert b_raw.closed is True
 
 
 def test_eviction_skips_objects_without_close():
@@ -186,18 +204,22 @@ def test_eviction_async_close_failure_is_logged_under_running_loop(caplog):
 
 
 def test_cache_clear_closes_all_entries():
-    """cache_clear calls close() on every cached value and empties the cache."""
+    """cache_clear detaches entries and closes them when returned proxies are gone."""
     cache = ClosingLRUCache(maxsize=4)
     a = cache.get_or_create("a", lambda: _Closeable("a"))
     b = cache.get_or_create("b", lambda: _Closeable("b"))
     c = cache.get_or_create("c", lambda: _Closeable("c"))
+    raw_values = [a.__wrapped__, b.__wrapped__, c.__wrapped__]
 
     cache.cache_clear()
 
-    assert a.closed is True
-    assert b.closed is True
-    assert c.closed is True
+    assert a.closed is False
+    assert b.closed is False
+    assert c.closed is False
     assert cache.cache_info()["size"] == 0
+    del a, b, c
+    gc.collect()
+    assert all(value.closed for value in raw_values)
 
 
 def test_cache_clear_skips_objects_without_close():
@@ -218,6 +240,27 @@ def test_cache_clear_handles_async_close():
 
     cache.cache_clear()
     assert obj.closed is True
+
+
+def test_awaitable_method_holds_lease_after_cache_clear():
+    """A one-liner method call keeps the proxy alive until the await completes."""
+    import asyncio
+
+    cache = ClosingLRUCache(maxsize=4)
+
+    async def run():
+        proxy = cache.get_or_create("a", lambda: _AsyncWorker("a"))
+        raw = proxy.__wrapped__
+        pending_ping = proxy.ping()
+        del proxy
+        cache.cache_clear()
+        assert raw.closed is False
+        closed_during_call = await pending_ping
+        assert closed_during_call is False
+        gc.collect()
+        assert raw.closed is True
+
+    asyncio.run(run())
 
 
 # -- @closing_lru_cache decorator -------------------------------------------
@@ -254,29 +297,37 @@ def test_decorator_different_args_create_different_entries():
 
 
 def test_decorator_evicts_and_closes():
-    """Decorated function evicts oldest entry and calls close() on it."""
+    """Decorated function closes evicted values after returned proxy release."""
 
     @closing_lru_cache(maxsize=2)
     def create(key):
         return _Closeable(key)
 
     a = create("a")
+    a_raw = a.__wrapped__
     create("b")
     create("c")
 
-    assert a.closed is True
+    assert a.closed is False
+    del a
+    gc.collect()
+    assert a_raw.closed is True
 
 
 def test_decorator_exposes_cache_clear():
-    """Decorated function has a cache_clear method that closes all entries."""
+    """Decorated function has a cache_clear method that detaches all entries."""
 
     @closing_lru_cache(maxsize=4)
     def create(key):
         return _Closeable(key)
 
     a = create("a")
+    a_raw = a.__wrapped__
     create.cache_clear()
-    assert a.closed is True
+    assert a.closed is False
+    del a
+    gc.collect()
+    assert a_raw.closed is True
 
 
 def test_decorator_exposes_cache_info():

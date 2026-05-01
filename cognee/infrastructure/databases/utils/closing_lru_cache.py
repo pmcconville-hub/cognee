@@ -1,7 +1,9 @@
-"""LRU cache that calls .close() on evicted entries."""
+"""LRU cache that closes entries after they leave the cache and caller scope."""
 
 import asyncio
+import inspect
 import logging
+import weakref
 from collections import OrderedDict
 from functools import wraps
 from threading import Lock
@@ -96,25 +98,132 @@ def _close_value(value):
         task.add_done_callback(_on_close_done)
 
 
-class ClosingLRUCache:
-    """Thread-safe LRU cache that calls ``close()`` on evicted values.
+class _LeasedCacheEntry:
+    """Own one cached value and close it after cache + returned proxy are gone."""
 
-    Unlike :func:`functools.lru_cache`, evicted entries are cleaned up
-    deterministically — their ``close()`` method (if present) is called
-    at the moment of eviction, while all fields are still alive.
+    def __init__(self, value):
+        self.value = value
+        self.proxy = None
+        self.in_cache = True
+        self.close_requested = False
+        self.closed = False
+        self._lock = Lock()
+
+    def lease(self):
+        with self._lock:
+            if self.closed:
+                raise RuntimeError(
+                    f"{type(self.value).__name__} cache entry is already closed"
+                )
+            if self.proxy is None:
+                self.proxy = _LeasedValueProxy(self)
+            return self.proxy
+
+    def proxy_released(self):
+        value_to_close = None
+        with self._lock:
+            self.proxy = None
+            if self.close_requested and not self.closed:
+                self.closed = True
+                value_to_close = self.value
+
+        if value_to_close is not None:
+            _close_value(value_to_close)
+
+    def detach_from_cache(self):
+        value_to_close = None
+        proxy_to_drop = None
+        with self._lock:
+            self.in_cache = False
+            self.close_requested = True
+            proxy_to_drop = self.proxy
+            self.proxy = None
+            if proxy_to_drop is None and not self.closed:
+                self.closed = True
+                value_to_close = self.value
+
+        if value_to_close is not None:
+            _close_value(value_to_close)
+        # Keep ``proxy_to_drop`` alive until after ``self._lock`` is released.
+        # If the cache held the last proxy reference, dropping it can run the
+        # weakref finalizer, which re-enters ``proxy_released()``.
+        del proxy_to_drop
+
+
+class _LeasedValueProxy:
+    """Proxy that keeps a cache entry alive while callers hold it."""
+
+    __slots__ = ("_entry", "_finalizer", "__weakref__")
+
+    def __init__(self, entry: _LeasedCacheEntry):
+        object.__setattr__(self, "_entry", entry)
+        object.__setattr__(self, "_finalizer", weakref.finalize(self, entry.proxy_released))
+
+    @property
+    def __class__(self):
+        return self._entry.value.__class__
+
+    @property
+    def __wrapped__(self):
+        return self._entry.value
+
+    def __repr__(self):
+        return repr(self._entry.value)
+
+    def __getattr__(self, name):
+        attr = getattr(self._entry.value, name)
+
+        if not callable(attr):
+            return attr
+
+        def call_with_lease(*args, **kwargs):
+            result = attr(*args, **kwargs)
+            if inspect.isawaitable(result):
+
+                async def await_with_lease(_self=self):
+                    # The closure keeps ``self`` alive until the awaitable
+                    # completes, which matters for one-liners like
+                    # ``await get_vector_engine().search(...)``.
+                    return await result
+
+                return await_with_lease()
+
+            return result
+
+        return call_with_lease
+
+    def __setattr__(self, name, value):
+        if name.startswith("_"):
+            object.__setattr__(self, name, value)
+            return
+        setattr(self._entry.value, name, value)
+
+
+class ClosingLRUCache:
+    """Thread-safe LRU cache that closes values after cache and caller use.
+
+    By default, cached values are returned through a stable proxy. Evicting
+    or clearing an entry removes it from future cache hits immediately, but
+    delays ``close()`` until the previously returned proxy is no longer held
+    by caller code. This keeps stale-but-live adapter references usable while
+    still cleaning up detached entries once they are genuinely unused.
     """
 
-    def __init__(self, maxsize: Optional[int] = 128):
+    def __init__(self, maxsize: Optional[int] = 128, lease: bool = True):
         """``maxsize`` semantics mirror ``functools.lru_cache``:
 
         - ``int > 0`` — bounded LRU. The least-recently-used entry is evicted
-          on insert and its ``close()`` is called.
+          on insert and its ``close()`` is requested.
         - ``int <= 0`` — cache disabled. ``factory()`` is called on every
           request and the result is returned to the caller without being
           stored. ``close()`` is NOT called: the caller owns the lifecycle,
           just like ``functools.lru_cache(maxsize=0)`` returns a fresh value
           per call.
         - ``None`` — unbounded. Entries are never evicted.
+
+        ``lease=True`` (default) returns a stable proxy per cached entry and
+        defers close until cache ownership and caller references are gone.
+        ``lease=False`` preserves the old immediate-close-on-eviction mode.
         """
         if isinstance(maxsize, int):
             if maxsize < 0:
@@ -123,7 +232,22 @@ class ClosingLRUCache:
             raise TypeError("maxsize must be an int or None")
         self._cache: OrderedDict = OrderedDict()
         self._maxsize = maxsize
+        self._lease = lease
         self._lock = Lock()
+
+    def _wrap_cached_value(self, entry):
+        if self._lease:
+            return entry.lease()
+        return entry.value
+
+    def _make_entry(self, value):
+        return _LeasedCacheEntry(value)
+
+    def _detach_entry(self, entry):
+        if self._lease:
+            entry.detach_from_cache()
+        else:
+            _close_value(entry.value)
 
     def get_or_create(self, key, factory):
         # Disabled-cache mode: act as a pass-through. Caller owns the value's
@@ -134,9 +258,10 @@ class ClosingLRUCache:
         with self._lock:
             if key in self._cache:
                 self._cache.move_to_end(key)
-                return self._cache[key]
+                return self._wrap_cached_value(self._cache[key])
 
         value = factory()
+        entry = self._make_entry(value)
 
         # Decide outcome under the lock; defer ``_close_value`` until
         # after release. ``_close_value`` can run arbitrary user code
@@ -151,18 +276,18 @@ class ClosingLRUCache:
             if key in self._cache:
                 self._cache.move_to_end(key)
                 loser_value = value
-                cached = self._cache[key]
+                cached = self._wrap_cached_value(self._cache[key])
             else:
                 # ``None`` means unbounded — skip the eviction check entirely.
                 if self._maxsize is not None and len(self._cache) >= self._maxsize:
                     _, evicted_value = self._cache.popitem(last=False)
-                self._cache[key] = value
-                cached = value
+                self._cache[key] = entry
+                cached = self._wrap_cached_value(entry)
 
         if loser_value is not None:
             _close_value(loser_value)
         if evicted_value is not None:
-            _close_value(evicted_value)
+            self._detach_entry(evicted_value)
         return cached
 
     def cache_clear(self):
@@ -171,10 +296,10 @@ class ClosingLRUCache:
         # arbitrary close() code can't stall every cache user (or
         # deadlock by re-entering cache creation).
         with self._lock:
-            values = list(self._cache.values())
+            entries = list(self._cache.values())
             self._cache.clear()
-        for value in values:
-            _close_value(value)
+        for entry in entries:
+            self._detach_entry(entry)
 
     def cache_info(self):
         """Return current size and max size."""
@@ -182,13 +307,13 @@ class ClosingLRUCache:
             return CacheInfo(size=len(self._cache), maxsize=self._maxsize)
 
 
-def closing_lru_cache(maxsize: Optional[int] = 128):
+def closing_lru_cache(maxsize: Optional[int] = 128, lease: bool = True):
     """Decorator that caches return values in a :class:`ClosingLRUCache`.
 
-    Drop-in replacement for ``@functools.lru_cache`` that calls ``.close()``
-    on values evicted from the cache. ``maxsize`` semantics match
-    ``functools.lru_cache``: positive int = bounded; ``0`` (or negative) =
-    disabled; ``None`` = unbounded.
+    Drop-in replacement for ``@functools.lru_cache`` that closes values once
+    they are both removed from the cache and no longer held by caller code.
+    ``maxsize`` semantics match ``functools.lru_cache``: positive int =
+    bounded; ``0`` (or negative) = disabled; ``None`` = unbounded.
 
     The decorated function gains ``cache_clear()`` and ``cache_info()``
     attributes, matching the ``lru_cache`` API, as well as a ``__wrapped__``
@@ -196,7 +321,7 @@ def closing_lru_cache(maxsize: Optional[int] = 128):
     """
 
     def decorator(fn):
-        cache = ClosingLRUCache(maxsize=maxsize)
+        cache = ClosingLRUCache(maxsize=maxsize, lease=lease)
 
         @wraps(fn)
         def wrapper(*args, **kwargs):
