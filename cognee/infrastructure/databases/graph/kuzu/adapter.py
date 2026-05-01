@@ -403,7 +403,7 @@ class KuzuAdapter(GraphDBInterface):
                     # for up to ``blocking_timeout`` (default 300 s) waiting
                     # for the previous holder. Offload so we don't freeze
                     # the event loop while another process holds the lock.
-                    await asyncio.to_thread(self.redis_lock.acquire_lock)
+                    redis_lock_handle = await asyncio.to_thread(self.redis_lock.acquire_lock)
                     try:
                         # Increment under ``_connection_lock`` so a transient
                         # teardown waiting in ``_drain_in_flight_queries``
@@ -445,7 +445,9 @@ class KuzuAdapter(GraphDBInterface):
                     finally:
                         # ``release_lock()`` is also sync and does Redis
                         # I/O — offload for symmetry with the acquire path.
-                        await asyncio.to_thread(self.redis_lock.release_lock)
+                        await asyncio.to_thread(
+                            self.redis_lock.release_lock, redis_lock_handle
+                        )
                 else:
                     # Hold _connection_lock only for init + counter bookkeeping;
                     # the actual query runs unlocked so multiple queries can
@@ -2421,10 +2423,9 @@ class KuzuAdapter(GraphDBInterface):
         # process could be mid-query (holding the on-disk file lock) when
         # we delete its files, or could open the DB right between our
         # drop and our reopen.
-        held_redis_lock = False
+        held_redis_lock = None
         if cache_config.shared_kuzu_lock and self.redis_lock is not None:
-            await asyncio.to_thread(self.redis_lock.acquire_lock)
-            held_redis_lock = True
+            held_redis_lock = await asyncio.to_thread(self.redis_lock.acquire_lock)
         try:
             # Transient drop: release the file handles so we can delete the
             # db files, but do NOT latch ``_permanently_closed`` — callers
@@ -2472,10 +2473,10 @@ class KuzuAdapter(GraphDBInterface):
             logger.error(f"Failed to delete graph data: {e}")
             raise
         finally:
-            if held_redis_lock:
+            if held_redis_lock is not None:
                 # Offloaded for symmetry with the acquire path; release
                 # does Redis I/O too.
-                await asyncio.to_thread(self.redis_lock.release_lock)
+                await asyncio.to_thread(self.redis_lock.release_lock, held_redis_lock)
 
     async def get_document_subgraph(self, data_id: str):
         """

@@ -598,11 +598,13 @@ async def test_query_does_not_block_event_loop_during_slow_redis_acquire(kuzu_ad
             self.acquired = False
             self.released = False
 
-        def acquire_lock(self) -> None:
+        def acquire_lock(self):
             _time.sleep(0.3)
             self.acquired = True
+            return self
 
-        def release_lock(self) -> None:
+        def release_lock(self, lock=None) -> None:
+            assert lock is self
             self.released = True
 
     stub = _SlowRedisLock()
