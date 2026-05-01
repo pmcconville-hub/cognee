@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import inspect
 import threading
 from collections import OrderedDict
 from os import path
@@ -1051,7 +1052,9 @@ class LanceDBAdapter(VectorDBInterface):
         # we're about to kill.
         if connection is not None and not self._subprocess_mode:
             try:
-                await connection.close()
+                close_result = connection.close()
+                if inspect.isawaitable(close_result):
+                    await close_result
             except Exception as e:
                 logger.warning("Error closing LanceDB connection: %s", e)
         if session is not None:

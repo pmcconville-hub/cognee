@@ -10,6 +10,18 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
+class CacheInfo(dict):
+    """Cache info mapping with functools.lru_cache-style attributes."""
+
+    @property
+    def currsize(self):
+        return self["size"]
+
+    @property
+    def maxsize(self):
+        return self["maxsize"]
+
+
 # Strong refs for fire-and-forget async close() tasks. ``asyncio.create_task``
 # returns a task whose only strong reference is our local variable; without
 # anchoring here, Python's gc can collect an in-flight eviction task before
@@ -167,7 +179,7 @@ class ClosingLRUCache:
     def cache_info(self):
         """Return current size and max size."""
         with self._lock:
-            return {"size": len(self._cache), "maxsize": self._maxsize}
+            return CacheInfo(size=len(self._cache), maxsize=self._maxsize)
 
 
 def closing_lru_cache(maxsize: Optional[int] = 128):
