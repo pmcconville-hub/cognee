@@ -42,9 +42,7 @@ def _cycles_type(raw: str) -> int:
     except ValueError:
         raise argparse.ArgumentTypeError(f"--cycles must be an integer, got {raw!r}")
     if not 1 <= n <= 20:
-        raise argparse.ArgumentTypeError(
-            f"--cycles must be between 1 and 20 inclusive, got {n}"
-        )
+        raise argparse.ArgumentTypeError(f"--cycles must be between 1 and 20 inclusive, got {n}")
     return n
 
 
@@ -263,9 +261,7 @@ def print_rss_history() -> None:
     print(f"  delta (final-baseline): {last_total - baseline_total:+.1f} MB", flush=True)
 
 
-async def run_cycle(
-    cycle_index: int, total_cycles: int, dataset_name: str, data
-) -> None:
+async def run_cycle(cycle_index: int, total_cycles: int, dataset_name: str, data) -> None:
     print(f"\n{'=' * 60}", flush=True)
     print(
         f"Cycle {cycle_index}/{total_cycles}  —  dataset='{dataset_name}'",
@@ -316,18 +312,13 @@ async def main() -> None:
     )
 
     base_dir = pathlib.Path(__file__).parent.resolve()
-    cognee.config.data_root_directory(
-        str(base_dir / ".data_storage" / "test_subprocess_rss")
-    )
-    cognee.config.system_root_directory(
-        str(base_dir / ".cognee_system" / "test_subprocess_rss")
-    )
+    cognee.config.data_root_directory(str(base_dir / ".data_storage" / "test_subprocess_rss"))
+    cognee.config.system_root_directory(str(base_dir / ".cognee_system" / "test_subprocess_rss"))
 
     # Lazy-download exactly the N large texts we need — one per round.
     selected_texts = LARGE_TEXTS[:rounds]
     large_text_paths = [
-        download_text(LARGE_TEXT_CACHE_DIR / filename, url)
-        for filename, url in selected_texts
+        download_text(LARGE_TEXT_CACHE_DIR / filename, url) for filename, url in selected_texts
     ]
 
     await cognee.prune.prune_data()
