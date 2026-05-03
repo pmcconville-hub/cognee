@@ -75,6 +75,29 @@ def read_ladybug_storage_version(ladybug_db_path: str) -> str:
         raise ValueError("Could not map version_code to proper Ladybug version.")
 
 
+def try_read_ladybug_storage_version(ladybug_db_path: str):
+    """Best-effort variant of ``read_ladybug_storage_version``.
+
+    Returns the mapped version string if the catalog file exists and its
+    version_code is present in ``ladybug_version_mapping``. Returns ``None``
+    when:
+
+      * the catalog file is missing (truly fresh path), or
+      * the version_code is newer than anything in the mapping (typically
+        a fresh DB written by a ladybug release the mapping table doesn't
+        list yet — at the time of writing the table tops out at 0.11.3,
+        so any code emitted by ladybug >= 0.12 lands here).
+
+    This is the lookup the runtime bootstrap path wants — the legacy
+    migration script keeps using ``read_ladybug_storage_version`` so its
+    CLI surface still raises on bad input.
+    """
+    try:
+        return read_ladybug_storage_version(ladybug_db_path)
+    except (FileNotFoundError, ValueError):
+        return None
+
+
 def _package_for_version(version: str) -> tuple[str, str]:
     version_parts = tuple(int(part) for part in version.split(".")[:3])
     package_name = "ladybug" if version_parts >= (0, 15, 0) else "kuzu"
