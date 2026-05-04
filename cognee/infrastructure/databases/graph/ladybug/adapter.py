@@ -2095,11 +2095,24 @@ class LadybugAdapter(GraphDBInterface):
         where_clauses = []
         params = {}
 
+        if not attribute_filters:
+            return [], []
+
         for i, filter_dict in enumerate(attribute_filters):
             for attr, values in filter_dict.items():
+                if not attr.isidentifier():
+                    raise CogneeValidationError(
+                        f"Invalid attribute filter key '{attr}'. Only identifiers are allowed."
+                    )
+                if not values:
+                    continue
+
                 param_name = f"values_{i}_{attr}"
                 where_clauses.append(f"n.{attr} IN ${param_name}")
                 params[param_name] = values
+
+        if not where_clauses:
+            return [], []
 
         where_clause = " AND ".join(where_clauses)
         nodes_query = f"""
@@ -2260,10 +2273,10 @@ class LadybugAdapter(GraphDBInterface):
         """
 
         try:
-            # Get basic graph data
-            nodes, edges = await self.get_model_independent_graph_data()
-            num_nodes = len(nodes[0]["nodes"]) if nodes else 0
-            num_edges = len(edges[0]["elements"]) if edges else 0
+            node_count_result = await self.query("MATCH (n:Node) RETURN COUNT(n)")
+            edge_count_result = await self.query("MATCH ()-[r:EDGE]->() RETURN COUNT(r)")
+            num_nodes = node_count_result[0][0] if node_count_result else 0
+            num_edges = edge_count_result[0][0] if edge_count_result else 0
 
             # Calculate mandatory metrics
             mandatory_metrics = {
@@ -2316,7 +2329,7 @@ class LadybugAdapter(GraphDBInterface):
         """Get the number of connected components in the graph."""
         query = """
         MATCH (n:Node)
-        WITH n.id AS node_id
+        WITH n, n.id AS node_id
         MATCH path = (n)-[:EDGE*1..3]-(m)
         WITH node_id, COLLECT(DISTINCT m.id) AS connected_nodes
         WITH COLLECT(DISTINCT connected_nodes + [node_id]) AS components
@@ -2329,7 +2342,7 @@ class LadybugAdapter(GraphDBInterface):
         """Get the sizes of all connected components in the graph."""
         query = """
         MATCH (n:Node)
-        WITH n.id AS node_id
+        WITH n, n.id AS node_id
         MATCH path = (n)-[:EDGE*1..3]-(m)
         WITH node_id, COLLECT(DISTINCT m.id) AS connected_nodes
         WITH COLLECT(DISTINCT connected_nodes + [node_id]) AS components
@@ -2587,7 +2600,13 @@ class LadybugAdapter(GraphDBInterface):
         result = await self.query(query)
         return [record[0] for record in result] if result else []
 
-    async def collect_events(self, ids: List[str]) -> Any:
+    def _normalize_temporal_ids(self, ids: Union[List[str], str]) -> List[str]:
+        if isinstance(ids, str):
+            return [uid.strip().strip("'\"") for uid in ids.split(",") if uid.strip()]
+
+        return ids
+
+    async def collect_events(self, ids: Union[List[str], str]) -> Any:
         """
         Collect all Event-type nodes reachable within 1..2 hops
         from the given node IDs.
@@ -2600,17 +2619,20 @@ class LadybugAdapter(GraphDBInterface):
             List of events
         """
 
-        event_collection_cypher = """UNWIND [{quoted}] AS uid
-            MATCH (start {{id: uid}})
+        event_collection_cypher = """UNWIND $ids AS uid
+            MATCH (start {id: uid})
             MATCH (start)-[*1..2]-(event)
             WHERE event.type = 'Event'
             WITH DISTINCT event
             RETURN collect(event) AS events;
         """
 
-        query = event_collection_cypher.format(quoted=ids)
-        result = await self.query(query)
+        ids = self._normalize_temporal_ids(ids)
+        result = await self.query(event_collection_cypher, {"ids": ids})
         events = []
+        if not result or not result[0] or not result[0][0]:
+            return [{"events": events}]
+
         for node in result[0][0]:
             props = json.loads(node["properties"])
 
@@ -2631,7 +2653,7 @@ class LadybugAdapter(GraphDBInterface):
         self,
         time_from: Optional[Timestamp] = None,
         time_to: Optional[Timestamp] = None,
-    ) -> str:
+    ) -> List[str]:
         """
         Collect IDs of Timestamp nodes between time_from and time_to.
 
@@ -2641,8 +2663,7 @@ class LadybugAdapter(GraphDBInterface):
             time_to: Upper bound int (inclusive), optional
 
         Returns:
-            A string of quoted IDs:  "'id1', 'id2', 'id3'"
-            (ready for use in a Cypher UNWIND clause).
+            A list of timestamp node IDs.
         """
 
         ids: List[str] = []
@@ -2706,7 +2727,7 @@ class LadybugAdapter(GraphDBInterface):
         time_nodes = await self.query(cypher)
         time_ids_list = [item[0] for item in time_nodes]
 
-        return ", ".join(f"'{uid}'" for uid in time_ids_list)
+        return time_ids_list
 
     async def get_triplets_batch(self, offset: int, limit: int) -> list[dict[str, Any]]:
         """
