@@ -2,7 +2,7 @@ import asyncio
 import time
 import uuid
 
-from cognee.infrastructure.databases.graph.kuzu.adapter import KuzuAdapter
+from cognee.infrastructure.databases.graph.ladybug.adapter import LadybugAdapter
 from cognee.modules.data.processing.document_types import PdfDocument
 from common import get_kuzu_db_path
 
@@ -18,7 +18,7 @@ def create_node(name):
 
 
 async def main():
-    adapter = KuzuAdapter(get_kuzu_db_path())
+    adapter = LadybugAdapter(get_kuzu_db_path())
     nodes = [create_node(f"Node{i}") for i in range(5)]
 
     print("Writer: Starting...")

@@ -13,7 +13,7 @@ import tempfile
 
 import pytest
 
-pytest.importorskip("kuzu")
+pytest.importorskip("ladybug")
 
 from cognee.infrastructure.databases.graph.kuzu.subprocess.proxy import (
     KuzuSubprocessSession,

@@ -13,6 +13,10 @@ from .graph_db_interface import GraphDBInterface
 from .supported_databases import supported_databases
 
 
+def _normalize_graph_database_provider(provider: str) -> str:
+    return provider.lower() if isinstance(provider, str) else provider
+
+
 def _get_create_graph_engine_optional_defaults() -> dict:
     """Return default values for optional create_graph_engine parameters."""
     signature = inspect.signature(create_graph_engine)
@@ -43,7 +47,7 @@ def _normalize_optional_create_graph_engine_params(params: dict) -> dict:
 
     if not normalized.get("graph_dataset_database_handler"):
         normalized["graph_dataset_database_handler"] = os.getenv(
-            "GRAPH_DATASET_DATABASE_HANDLER", "kuzu"
+            "GRAPH_DATASET_DATABASE_HANDLER", "ladybug"
         )
 
     return normalized
@@ -89,6 +93,7 @@ def create_graph_engine(
 
     normalized_optional_params = _normalize_optional_create_graph_engine_params(locals())
     graph_database_url = normalized_optional_params["graph_database_url"]
+    graph_database_provider = _normalize_graph_database_provider(graph_database_provider)
     graph_database_name = normalized_optional_params["graph_database_name"]
     graph_database_username = normalized_optional_params["graph_database_username"]
     graph_database_password = normalized_optional_params["graph_database_password"]
@@ -161,7 +166,7 @@ def _create_graph_engine(
     Parameters:
     -----------
 
-        - graph_database_provider: The type of graph database provider to use (e.g., neo4j, falkor, kuzu).
+        - graph_database_provider: The type of graph database provider to use (e.g., neo4j, falkor, ladybug).
         - graph_database_url: The URL for the graph database instance. Required for neo4j and falkordb providers.
         - graph_database_username: The username for authentication with the graph database.
           Required for neo4j provider.
@@ -169,7 +174,7 @@ def _create_graph_engine(
           Required for neo4j provider.
         - graph_database_port: The port number for the graph database connection. Required
           for the falkordb provider
-        - graph_file_path: The filesystem path to the graph file. Required for the kuzu
+        - graph_file_path: The filesystem path to the graph file. Required for the ladybug
           provider.
 
     Returns:
@@ -213,21 +218,25 @@ def _create_graph_engine(
 
         return PostgresAdapter(connection_string=graph_database_url)
 
-    elif graph_database_provider == "kuzu":
+    elif graph_database_provider in ("ladybug", "kuzu"):
         if not graph_file_path:
-            raise EnvironmentError("Missing required Kuzu database path.")
+            raise EnvironmentError("Missing required Ladybug database path.")
 
-        from .kuzu.adapter import KuzuAdapter
+        from .ladybug.adapter import LadybugAdapter
 
         if graph_database_subprocess_enabled:
-            # Kuzu expects the parent directory of its db file to already exist.
-            # The local-mode adapter does this in _initialize_connection; in
-            # subprocess mode we do the equivalent here before spinning up the
-            # worker.
+            # Ladybug expects the parent directory of its db file to already
+            # exist. The local-mode adapter does this in
+            # ``_initialize_connection``; in subprocess mode we do the
+            # equivalent here before spinning up the worker.
             db_parent = os.path.dirname(os.path.abspath(graph_file_path))
             if db_parent:
                 os.makedirs(db_parent, exist_ok=True)
 
+            # Subprocess proxy still lives under ``kuzu/`` for now — it's
+            # internal infrastructure; renaming the module path would be
+            # pure churn. Class names stay ``RemoteKuzu*`` for the same
+            # reason: at runtime they wrap whatever ``ladybug`` exposes.
             from .kuzu.subprocess.proxy import (
                 KuzuSubprocessSession,
                 RemoteKuzuConnection,
@@ -254,11 +263,11 @@ def _create_graph_engine(
                 # query blow up with a confusing error inside the worker.
                 conn.load_extension("JSON")
 
-                # Adapter construction must stay inside the guard: with
-                # ``injected=True`` the ``__init__`` body runs schema
+                # Adapter construction must stay inside the guard: with the
+                # injected handles the ``__init__`` body runs schema
                 # bootstrap RPCs against the worker, which can raise. A
                 # raise outside this block would orphan the subprocess.
-                return KuzuAdapter(
+                return LadybugAdapter(
                     db_path=graph_file_path,
                     kuzu_num_threads=kuzu_num_threads,
                     kuzu_buffer_pool_size=kuzu_buffer_pool_size,
@@ -271,20 +280,20 @@ def _create_graph_engine(
                 session.shutdown(timeout=2.0)
                 raise
 
-        return KuzuAdapter(
+        return LadybugAdapter(
             db_path=graph_file_path,
             kuzu_num_threads=kuzu_num_threads,
             kuzu_buffer_pool_size=kuzu_buffer_pool_size,
             kuzu_max_db_size=kuzu_max_db_size,
         )
 
-    elif graph_database_provider == "kuzu-remote":
+    elif graph_database_provider in ("ladybug-remote", "kuzu-remote"):
         if not graph_database_url:
-            raise EnvironmentError("Missing required Kuzu remote URL.")
+            raise EnvironmentError("Missing required Ladybug remote URL.")
 
-        from .kuzu.remote_kuzu_adapter import RemoteKuzuAdapter
+        from .ladybug.remote_ladybug_adapter import RemoteLadybugAdapter
 
-        return RemoteKuzuAdapter(
+        return RemoteLadybugAdapter(
             api_url=graph_database_url,
             username=graph_database_username,
             password=graph_database_password,
@@ -348,6 +357,8 @@ def _create_graph_engine(
 
     all_providers = list(supported_databases.keys()) + [
         "neo4j",
+        "ladybug",
+        "ladybug-remote",
         "kuzu",
         "kuzu-remote",
         "postgres",

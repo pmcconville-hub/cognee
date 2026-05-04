@@ -1,11 +1,11 @@
 import asyncio
 
-from cognee.infrastructure.databases.graph.kuzu.adapter import KuzuAdapter
+from cognee.infrastructure.databases.graph.ladybug.adapter import LadybugAdapter
 from common import get_kuzu_db_path
 
 
 async def main():
-    adapter = KuzuAdapter(get_kuzu_db_path())
+    adapter = LadybugAdapter(get_kuzu_db_path())
 
     for _ in range(5):
         result = await adapter.query("MATCH (n:Node) RETURN COUNT(n)")

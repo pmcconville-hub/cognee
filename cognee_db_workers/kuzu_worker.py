@@ -1,7 +1,10 @@
-"""Kuzu subprocess worker. Imports only ``kuzu`` + stdlib + harness/protocol.
+"""Ladybug (formerly Kuzu) subprocess worker.
 
-Must not import cognee — that would defeat the whole point of running the DB
-client in a separate process.
+Imports only ``ladybug`` + stdlib + harness/protocol. Must not import cognee
+— that would defeat the whole point of running the DB client in a separate
+process. The module name retains the historical ``kuzu_worker`` spelling so
+existing imports (and the ``test_worker_import_hygiene`` allowlist) keep
+working without churn.
 """
 
 from __future__ import annotations
@@ -27,9 +30,9 @@ from .kuzu_protocol import (
 
 
 def _open_database(registry: HandleRegistry, req: Request) -> HandleResult:
-    import kuzu
+    import ladybug
 
-    db = kuzu.Database(**req.kwargs)
+    db = ladybug.Database(**req.kwargs)
     return HandleResult(value=None, handle_id=registry.register(db))
 
 
@@ -50,11 +53,11 @@ def _db_close(registry: HandleRegistry, req: Request) -> None:
 
 
 def _open_connection(registry: HandleRegistry, req: Request) -> HandleResult:
-    import kuzu
+    import ladybug
 
     db_handle_id = req.args[0]
     db = registry.get(db_handle_id)
-    conn = kuzu.Connection(db)
+    conn = ladybug.Connection(db)
     return HandleResult(value=None, handle_id=registry.register(conn))
 
 
@@ -89,8 +92,8 @@ def _conn_execute_fetch_all(registry: HandleRegistry, req: Request):
             raw = result.get_next()
             rows.append(tuple(cell.as_py() if hasattr(cell, "as_py") else cell for cell in raw))
     finally:
-        # Kuzu's Python QueryResult is auto-closed on GC; explicit close is a
-        # safety net when available.
+        # Ladybug's Python QueryResult is auto-closed on GC; explicit close is
+        # a safety net when available.
         if hasattr(result, "close"):
             try:
                 result.close()

@@ -112,9 +112,7 @@ class _LeasedCacheEntry:
     def lease(self):
         with self._lock:
             if self.closed:
-                raise RuntimeError(
-                    f"{type(self.value).__name__} cache entry is already closed"
-                )
+                raise RuntimeError(f"{type(self.value).__name__} cache entry is already closed")
             if self.proxy is None:
                 self.proxy = _LeasedValueProxy(self)
             return self.proxy

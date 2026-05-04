@@ -591,7 +591,10 @@ async def test_query_does_not_block_event_loop_during_slow_redis_acquire(kuzu_ad
     import asyncio
     import time as _time
 
-    from cognee.infrastructure.databases.graph.kuzu import adapter as kuzu_adapter_mod
+    # Reach through to the real adapter module — ``kuzu.adapter`` is now a
+    # legacy import shim; the module-globals (``cache_config``,
+    # ``ThreadPoolExecutor``, etc.) live on ``ladybug.adapter``.
+    from cognee.infrastructure.databases.graph.ladybug import adapter as kuzu_adapter_mod
 
     class _SlowRedisLock:
         def __init__(self) -> None:
@@ -610,9 +613,9 @@ async def test_query_does_not_block_event_loop_during_slow_redis_acquire(kuzu_ad
     stub = _SlowRedisLock()
     kuzu_adapter.redis_lock = stub
     # Force the shared-lock branch. ``cache_config`` is module-global on
-    # the adapter module; mutating its ``shared_kuzu_lock`` flag is
+    # the adapter module; mutating its ``shared_ladybug_lock`` flag is
     # enough to send ``query()`` down the redis-lock path.
-    monkeypatch.setattr(kuzu_adapter_mod.cache_config, "shared_kuzu_lock", True)
+    monkeypatch.setattr(kuzu_adapter_mod.cache_config, "shared_ladybug_lock", True)
 
     ticks = 0
     stop = asyncio.Event()
