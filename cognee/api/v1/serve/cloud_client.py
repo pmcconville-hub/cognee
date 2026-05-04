@@ -59,6 +59,10 @@ class CloudClient:
             form.add_field("run_in_background", "true")
         if kwargs.get("custom_prompt"):
             form.add_field("custom_prompt", kwargs["custom_prompt"])
+        if kwargs.get("chunk_size") is not None:
+            form.add_field("chunk_size", str(kwargs["chunk_size"]))
+        if kwargs.get("chunks_per_batch") is not None:
+            form.add_field("chunks_per_batch", str(kwargs["chunks_per_batch"]))
 
         # Handle data — string or file-like objects
         if isinstance(data, str):
@@ -220,6 +224,14 @@ class CloudClient:
             payload["datasets"] = (
                 [str(d) for d in datasets] if isinstance(datasets, list) else [str(datasets)]
             )
+        if kwargs.get("run_in_background"):
+            payload["run_in_background"] = True
+        if kwargs.get("custom_prompt"):
+            payload["custom_prompt"] = kwargs["custom_prompt"]
+        if kwargs.get("chunk_size") is not None:
+            payload["chunk_size"] = kwargs["chunk_size"]
+        if kwargs.get("chunks_per_batch") is not None:
+            payload["chunks_per_batch"] = kwargs["chunks_per_batch"]
 
         async with session.post(
             f"{self.service_url}/api/v1/cognify",
