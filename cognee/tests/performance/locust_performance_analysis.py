@@ -1,20 +1,20 @@
 """
-Cognee Load Tests using LocustIO
+Cognee Load Tests using Locust
 
 Usage examples:
     # Note: ENV variables must be set before usage.
 
     # Multi-dataset test through the web UI
-    locust -f locustfile.py --host http://your-cognee-instance.com MultiDatasetCogneeTest
+    locust -f locust_performance_analysis.py --host http://your-cognee-instance.com MultiDatasetCogneeTest
 
     # Single-dataset test through the web UI
-    locust -f locustfile.py --host http://your-cognee-instance.com SingleDatasetCogneeTest
+    locust -f locust_performance_analysis.py --host http://your-cognee-instance.com SingleDatasetCogneeTest
 
     # Both simultaneously
-    locust -f locustfile.py --host http://your-cognee-instance.com
+    locust -f locust_performance_analysis.py --host http://your-cognee-instance.com
 
     # Headles without UI, 10 Locust users, 5 minutes
-    locust -f locustfile.py --host http://your-cognee-instance.com \
+    locust -f locust_performance_analysis.py --host http://your-cognee-instance.com \
     --headless -u 10 -r 2 --run-time 5m --csv results
 
 Environment variables:
@@ -327,8 +327,9 @@ if __name__ == "__main__":
 
     key_path = tempfile.NamedTemporaryFile(suffix=".key", delete=False).name
     try:
+        # Generate API key in a separate process to avoid any potential issues with locust's monkey-patching of libraries like gevent.
         subprocess.run(
-            [sys.executable, "-m", "bootstrap_script", key_path],
+            [sys.executable, "-m", "utils.bootstrap_script", key_path],
             check=True,
         )
         api_key = Path(key_path).read_text().strip()
