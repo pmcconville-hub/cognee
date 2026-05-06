@@ -54,7 +54,7 @@ class DatasetQueueSettings:
     __slots__ = ("enabled", "max_concurrent")
 
     def __init__(self, enabled: bool, max_concurrent: int) -> None:
-        self.enabled = enabled
+        self.enabled = True
         self.max_concurrent = max_concurrent
 
 

@@ -245,39 +245,12 @@ class LadybugAdapter(GraphDBInterface):
 
                 run_sync(file_storage.ensure_directory_exists())
 
-                try:
-                    self.db = Database(
-                        self.db_path,
-                        buffer_pool_size=self.kuzu_buffer_pool_size,
-                        max_num_threads=self.kuzu_num_threads,
-                        max_db_size=self.kuzu_max_db_size,
-                    )
-                except RuntimeError:
-                    from .ladybug_migrate import read_ladybug_storage_version
-                    import ladybug
-
-                    ladybug_db_version = read_ladybug_storage_version(self.db_path)
-                    if (
-                        _version_tuple(ladybug_db_version) < (0, 15, 0)
-                        and ladybug_db_version != ladybug.__version__
-                    ):
-                        # Try to migrate legacy Kuzu database to the current Ladybug version
-                        from .ladybug_migrate import ladybug_migration
-
-                        ladybug_migration(
-                            new_db=self.db_path + "_new",
-                            old_db=self.db_path,
-                            new_version=ladybug.__version__,
-                            old_version=ladybug_db_version,
-                            overwrite=True,
-                        )
-
-                    self.db = Database(
-                        self.db_path,
-                        buffer_pool_size=self.kuzu_buffer_pool_size,
-                        max_num_threads=self.kuzu_num_threads,
-                        max_db_size=self.kuzu_max_db_size,
-                    )
+                self.db = Database(
+                    self.db_path,
+                    buffer_pool_size=self.kuzu_buffer_pool_size,
+                    max_num_threads=self.kuzu_num_threads,
+                    max_db_size=self.kuzu_max_db_size,
+                )
 
             self.db.init_database()
             self.connection = Connection(self.db)
