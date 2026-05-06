@@ -32,7 +32,7 @@ class VectorConfig(BaseSettings):
     vector_db_username: str = ""
     vector_db_password: str = ""
     vector_db_host: str = ""
-    vector_db_subprocess_enabled: bool = False
+    vector_db_subprocess_enabled: bool = True
 
     model_config = SettingsConfigDict(env_file=".env", extra="allow")
 

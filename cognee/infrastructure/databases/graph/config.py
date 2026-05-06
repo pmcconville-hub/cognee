@@ -56,7 +56,7 @@ class GraphConfig(BaseSettings):
     graph_model: object = KnowledgeGraph
     graph_topology: object = KnowledgeGraph
     graph_dataset_database_handler: str = "ladybug"
-    graph_database_subprocess_enabled: bool = False
+    graph_database_subprocess_enabled: bool = True
 
     # Kuzu tuning. 0 means "use Kuzu's default" (one thread per CPU).
     kuzu_num_threads: int = Field(0, env="KUZU_NUM_THREADS")
