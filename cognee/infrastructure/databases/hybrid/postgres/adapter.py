@@ -284,7 +284,10 @@ class PostgresHybridAdapter(GraphDBInterface, VectorDBInterface):
             if not valid_items:
                 continue
             texts = [t for _, t in valid_items]
-            vectors = await self._vector.embed_data(texts)
+            batch_size = self._vector.embedding_engine.get_batch_size()
+            vectors = []
+            for i in range(0, len(texts), batch_size):
+                vectors.extend(await self._vector.embed_data(texts[i : i + batch_size]))
             embeddings_by_collection[collection] = [
                 (dp, vec, t) for (dp, t), vec in zip(valid_items, vectors)
             ]
@@ -390,7 +393,12 @@ class PostgresHybridAdapter(GraphDBInterface, VectorDBInterface):
         # Embed unique edge types
         unique_texts = list(edge_type_counts.keys())
         if unique_texts:
-            unique_vectors = await self._vector.embed_data(unique_texts)
+            batch_size = self._vector.embedding_engine.get_batch_size()
+            unique_vectors = []
+            for i in range(0, len(unique_texts), batch_size):
+                unique_vectors.extend(
+                    await self._vector.embed_data(unique_texts[i : i + batch_size])
+                )
             text_to_vector = dict(zip(unique_texts, unique_vectors))
         else:
             text_to_vector = {}
