@@ -5,7 +5,7 @@
     "ghcr.io/devcontainers/features/git:1": {},
     "ghcr.io/devcontainers/features/docker-in-docker:2": {}
   },
-  "postCreateCommand": "uv sync && cp .env.template .env && echo 'Set LLM_API_KEY in .env to get started'",
+  "postCreateCommand": "uv sync && cp cognee/.env.template cognee/.env && echo 'Set LLM_API_KEY in cognee/.env to get started'",
   "forwardPorts": [8000, 3000],
   "portsAttributes": {
     "8000": {"label": "Cognee API", "onAutoForward": "notify"},
