@@ -244,12 +244,40 @@ class LadybugAdapter(GraphDBInterface):
 
                 run_sync(file_storage.ensure_directory_exists())
 
-                self.db = Database(
-                    self.db_path,
-                    buffer_pool_size=self.kuzu_buffer_pool_size,
-                    max_num_threads=self.kuzu_num_threads,
-                    max_db_size=self.kuzu_max_db_size,
-                )
+                try:
+                    self.db = Database(
+                        self.db_path,
+                        buffer_pool_size=self.kuzu_buffer_pool_size,
+                        max_num_threads=self.kuzu_num_threads,
+                        max_db_size=self.kuzu_max_db_size,
+                    )
+                except RuntimeError:
+                    from .ladybug_migrate import try_read_ladybug_storage_version
+                    import ladybug
+
+                    # An unknown version_code (None) means either a fresh path
+                    # or a DB written by a ladybug release newer than
+                    # ladybug_version_mapping knows about. In both cases the
+                    # legacy-Kuzu migration is not applicable — just retry the
+                    # init below. Without this, ladybug>=0.12 fresh DBs raise
+                    # "Could not map version_code to proper Ladybug version"
+                    # because the mapping tops out at 0.11.3.
+                    ladybug_db_version = try_read_ladybug_storage_version(self.db_path)
+                    if (
+                        ladybug_db_version is not None
+                        and _version_tuple(ladybug_db_version) < (0, 15, 0)
+                        and ladybug_db_version != ladybug.__version__
+                    ):
+                        # Try to migrate legacy Kuzu database to the current Ladybug version
+                        from .ladybug_migrate import ladybug_migration
+
+                        ladybug_migration(
+                            new_db=self.db_path + "_new",
+                            old_db=self.db_path,
+                            new_version=ladybug.__version__,
+                            old_version=ladybug_db_version,
+                            overwrite=True,
+                        )
 
             self.db.init_database()
             self.connection = Connection(self.db)
