@@ -699,7 +699,7 @@ async def test_delete_graph_subprocess_recreates_schema(subprocess_adapter):
     """``delete_graph`` removes the on-disk store, so the reopened DB is
     empty and has no Node/EDGE tables. Without recreating the schema,
     the next graph query raises "table Node does not exist". Pins the
-    ``_ensure_schema()`` call at the end of ``_reopen_subprocess_proxies``.
+    ``_ensure_schema()`` call at the end of ``_rebuild_subprocess_proxies``.
     """
     kg = _load_demo_kg()
     await subprocess_adapter.add_nodes(kg.nodes)

@@ -87,10 +87,13 @@ class LadybugAdapter(GraphDBInterface):
         database, connection, session:
             Optional pre-built Database/Connection and a subprocess session.
             When supplied, the adapter runs in subprocess-proxy mode: the
-            native ladybug.Database/Connection live in a dedicated worker process
-            and ``database``/``connection`` are main-side proxies. In this mode
-            the adapter does NOT rebuild the connection lazily on close; the
-            lifecycle is owned by the factory + LRU cache.
+            native ladybug.Database/Connection live in a dedicated worker
+            process and ``database``/``connection`` are main-side proxies.
+            After a transient drop (e.g. ``delete_graph``) the adapter
+            rebuilds proxies lazily against the surviving ``session``;
+            after ``close()`` the session is zeroed and the adapter is a
+            permanent error state — its lifecycle is owned by the factory
+            + LRU cache.
 
             ``database``, ``connection``, and ``session`` must be provided
             together (subprocess mode) or all left ``None`` (local mode).
@@ -464,10 +467,12 @@ class LadybugAdapter(GraphDBInterface):
     def get_or_init_connection(self) -> Connection:
         """Return the current connection, initializing it first if needed.
 
-        In subprocess-proxy mode we never fall through to a local
-        ``ladybug.Database`` init — that would open the same DB path in the main
-        process and conflict with any surviving subprocess on the Ladybug file
-        lock. A closed subprocess-mode adapter is a permanent error state.
+        Subprocess mode rebuilds proxies through the surviving
+        ``self._session`` rather than falling through to a local
+        ``ladybug.Database`` init — opening the same DB path in the main
+        process would conflict with the subprocess on the Ladybug file
+        lock. If ``self._session`` itself is gone the adapter is a
+        permanent error state (only ``close()`` zeroes the session).
 
         Callers must hold ``_connection_lock`` to prevent races with
         explicit calls to ``close()``.
@@ -482,11 +487,14 @@ class LadybugAdapter(GraphDBInterface):
                 raise RuntimeError("LadybugAdapter is closed; a new adapter must be created.")
         if not self.connection:
             if self._subprocess_mode:
-                raise RuntimeError(
-                    "LadybugAdapter subprocess session is gone; adapter cannot "
-                    "be re-initialized in local mode."
-                )
-            self._initialize_connection()
+                if self._session is None:
+                    raise RuntimeError(
+                        "LadybugAdapter subprocess session is gone; adapter "
+                        "cannot be re-initialized."
+                    )
+                self._rebuild_subprocess_proxies()
+            else:
+                self._initialize_connection()
             # Re-check the closed latch after init: ``close()`` may have
             # flipped it while we were inside ``_initialize_connection``
             # (which opens a ladybug.Database and takes the on-disk file
@@ -551,18 +559,25 @@ class LadybugAdapter(GraphDBInterface):
                 logger.warning(f"Error closing Ladybug database: {e}")
             self.db = None
 
-    def _reopen_subprocess_proxies(self) -> None:
+    def _rebuild_subprocess_proxies(self) -> None:
         """Recreate ``self.db`` + ``self.connection`` against the existing
-        ``self._session`` after a transient drop (``delete_graph``).
+        ``self._session`` after a transient drop (e.g. files removed by
+        ``delete_graph`` or native handles dropped by the shared-lock
+        per-query path).
 
-        Subprocess mode only — local mode re-inits lazily in
-        ``_initialize_connection`` from the next ``get_or_init_connection``
-        call. Sync method (called via ``asyncio.to_thread`` from the
-        async caller because the proxy constructors issue blocking RPCs
-        through the session).
+        Subprocess-mode counterpart to local mode's ``_initialize_connection``.
+        Called lazily from ``get_or_init_connection`` on the next query, not
+        eagerly — that way ``delete_graph`` does not silently recreate the
+        on-disk store it just removed. Sync method: the proxy constructors
+        issue blocking RPCs through the session, but the call site already
+        runs sync from inside ``get_or_init_connection`` (matching the
+        local-mode pattern).
         """
         # Imported here to avoid a top-level cycle with the proxy module.
-        from .subprocess.proxy import RemoteKuzuConnection, RemoteKuzuDatabase
+        from cognee.infrastructure.databases.graph.kuzu.subprocess.proxy import (
+            RemoteKuzuConnection,
+            RemoteKuzuDatabase,
+        )
 
         self.db = RemoteKuzuDatabase(
             self._session,
@@ -2450,16 +2465,14 @@ class LadybugAdapter(GraphDBInterface):
 
             logger.info(f"Deleted Ladybug database files at {self.db_path}")
 
-            # In subprocess mode ``get_or_init_connection`` refuses to
-            # rebuild proxies (it has no kwargs to drive a fresh
-            # ``RemoteKuzuDatabase``), so the next query would raise
-            # "subprocess session is gone". Reopen here using the
-            # original tuning + the surviving ``self._session`` so
-            # callers can keep using the adapter after ``delete_graph``.
-            # Local mode lazily re-inits via ``_initialize_connection``
-            # on next query, so no work needed here.
-            if self._subprocess_mode and self._session is not None:
-                await asyncio.to_thread(self._reopen_subprocess_proxies)
+            # No eager reopen here: we just removed the on-disk store, and
+            # callers asking us to delete it should not get a freshly
+            # recreated empty database as a side effect. If the same
+            # adapter is reused for a query later, ``get_or_init_connection``
+            # rebuilds proxies + schema lazily — same shape local mode has
+            # always had. If the caller is the dataset-deletion handler,
+            # the cache evicts this entry and ``close()`` shuts the
+            # subprocess down cleanly.
 
         except Exception as e:
             logger.error(f"Failed to delete graph data: {e}")

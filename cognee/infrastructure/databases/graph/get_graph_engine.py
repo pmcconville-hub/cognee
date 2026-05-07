@@ -139,6 +139,36 @@ def create_graph_engine(
     )
 
 
+def evict_graph_engine(**kwargs) -> bool:
+    """Evict a cached graph engine entry created via ``create_graph_engine``.
+
+    Mirrors ``create_graph_engine``'s normalization so the cache key
+    matches. Used by per-dataset deletion paths to drop the leased
+    adapter (and trigger its ``close()``) without disturbing the rest
+    of the cache.
+
+    Returns True if the entry existed.
+    """
+    normalized = _normalize_optional_create_graph_engine_params(kwargs)
+    provider = _normalize_graph_database_provider(kwargs.get("graph_database_provider"))
+    return _create_graph_engine.cache_evict(
+        provider,
+        kwargs.get("graph_file_path"),
+        normalized["graph_database_url"],
+        normalized["graph_database_name"],
+        normalized["graph_database_username"],
+        normalized["graph_database_password"],
+        normalized["graph_database_allow_anonymous"],
+        normalized["graph_database_port"],
+        normalized["graph_database_key"],
+        normalized["graph_dataset_database_handler"],
+        normalized["graph_database_subprocess_enabled"],
+        normalized["kuzu_num_threads"],
+        normalized["kuzu_buffer_pool_size"],
+        normalized["kuzu_max_db_size"],
+    )
+
+
 @closing_lru_cache(maxsize=DATABASE_MAX_LRU_CACHE_SIZE)
 def _create_graph_engine(
     graph_database_provider,

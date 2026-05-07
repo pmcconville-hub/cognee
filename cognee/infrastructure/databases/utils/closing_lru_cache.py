@@ -299,6 +299,21 @@ class ClosingLRUCache:
         for entry in entries:
             self._detach_entry(entry)
 
+    def evict(self, key) -> bool:
+        """Remove a single entry by key and request its close.
+
+        Returns True if an entry was evicted, False if the key wasn't
+        cached. Uses the same defer-close-after-lock pattern as
+        ``get_or_create`` / ``cache_clear`` so user close() code can't
+        deadlock the cache.
+        """
+        with self._lock:
+            entry = self._cache.pop(key, None)
+        if entry is None:
+            return False
+        self._detach_entry(entry)
+        return True
+
     def cache_info(self):
         """Return current size and max size."""
         with self._lock:
@@ -321,17 +336,28 @@ def closing_lru_cache(maxsize: Optional[int] = 128, lease: bool = True):
     def decorator(fn):
         cache = ClosingLRUCache(maxsize=maxsize, lease=lease)
 
-        @wraps(fn)
-        def wrapper(*args, **kwargs):
+        def _key(args, kwargs):
             # ``_KW_MARK`` separates positional from keyword args so
             # ``fn(("a", 1))`` and ``fn(a=1)`` don't collide.
             if kwargs:
-                key = args + (_KW_MARK,) + tuple(sorted(kwargs.items()))
-            else:
-                key = args
-            return cache.get_or_create(key, lambda: fn(*args, **kwargs))
+                return args + (_KW_MARK,) + tuple(sorted(kwargs.items()))
+            return args
+
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            return cache.get_or_create(_key(args, kwargs), lambda: fn(*args, **kwargs))
+
+        def cache_evict(*args, **kwargs) -> bool:
+            """Evict a single entry whose key matches the given args.
+
+            Pass exactly the same args the original call used — the key
+            is built with the same scheme as ``wrapper``. Returns True
+            if the entry was present.
+            """
+            return cache.evict(_key(args, kwargs))
 
         wrapper.cache_clear = cache.cache_clear
+        wrapper.cache_evict = cache_evict
         wrapper.cache_info = cache.cache_info
         wrapper.__wrapped__ = fn
         return wrapper
