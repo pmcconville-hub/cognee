@@ -131,10 +131,6 @@ class LadybugAdapter(GraphDBInterface):
         self.executor = ThreadPoolExecutor()
 
         if cache_config.shared_ladybug_lock:
-            if injected:
-                raise RuntimeError(
-                    "Ladybug subprocess mode is incompatible with shared_ladybug_lock."
-                )
             self.redis_lock = get_cache_engine(
                 lock_key="ladybug-lock-" + str(uuid5(NAMESPACE_OID, db_path))
             )
