@@ -130,3 +130,36 @@ async def test_add_edges_with_vectors_batch_size_zero_falls_back_to_single_call(
     assert len(calls) == 1, f"expected 1 fallback call, got {len(calls)}"
     (texts,) = calls[0].args
     assert sorted(texts) == sorted(f"rel_{i}" for i in range(5))
+
+
+@pytest.mark.asyncio
+async def test_add_nodes_with_vectors_negative_batch_size_falls_back_to_single_call():
+    """Negative get_batch_size() must not silently drop embeddings.
+
+    range(0, n, -1) yields no iterations, so without the guard the loop would
+    skip every input and `vectors` would stay empty — silent data loss. The
+    fallback to len(items) makes the loop run once with all inputs.
+    """
+    adapter = _make_fake_hybrid(batch_size=-1)
+    nodes = [_Node(id=uuid4(), name=f"n{i}") for i in range(5)]
+
+    await adapter.add_nodes_with_vectors(nodes)
+
+    calls = adapter._vector.embed_data.await_args_list
+    assert len(calls) == 1, f"expected 1 fallback call, got {len(calls)}"
+    (texts,) = calls[0].args
+    assert sorted(texts) == sorted(f"n{i}" for i in range(5))
+
+
+@pytest.mark.asyncio
+async def test_add_edges_with_vectors_negative_batch_size_falls_back_to_single_call():
+    """Same fallback for edges: negative get_batch_size() → one all-inputs call."""
+    adapter = _make_fake_hybrid(batch_size=-1)
+    edges = [(str(uuid4()), str(uuid4()), f"rel_{i}", {"edge_text": f"rel_{i}"}) for i in range(5)]
+
+    await adapter.add_edges_with_vectors(edges)
+
+    calls = adapter._vector.embed_data.await_args_list
+    assert len(calls) == 1, f"expected 1 fallback call, got {len(calls)}"
+    (texts,) = calls[0].args
+    assert sorted(texts) == sorted(f"rel_{i}" for i in range(5))
