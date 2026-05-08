@@ -232,6 +232,7 @@ class AddCognifySearchFlow(SequentialTaskSet):
             "searchType": SEARCH_TYPE,
             "query": query,
             "datasets": [self.dataset_name],
+            "only_context": True,
         }
         with self.client.post(
             "/api/v1/search",
@@ -328,9 +329,11 @@ if __name__ == "__main__":
     key_path = tempfile.NamedTemporaryFile(suffix=".key", delete=False).name
     try:
         # Generate API key in a separate process to avoid any potential issues with locust's monkey-patching of libraries like gevent.
+        perf_dir = str(Path(__file__).resolve().parent)
         subprocess.run(
             [sys.executable, "-m", "utils.bootstrap_script", key_path],
             check=True,
+            cwd=perf_dir,
         )
         api_key = Path(key_path).read_text().strip()
     finally:
