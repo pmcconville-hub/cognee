@@ -42,6 +42,8 @@ class AnthropicAdapter(GenericAPIAdapter):
         instructor_mode: str | None = None,
         llm_args: dict[str, Any] | None = None,
     ) -> None:
+        # Support both "model" and "anthropic/model" formats for model names, stripping the "anthropic/" prefix
+        model = model.removeprefix("anthropic/") if model.startswith("anthropic/") else model
         super().__init__(
             api_key=api_key,
             model=model,
