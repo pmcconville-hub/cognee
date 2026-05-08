@@ -58,6 +58,53 @@ class LadybugAdapter(GraphDBInterface):
     well as for graph metrics and data extraction.
     """
 
+    @classmethod
+    def create_subprocess(
+        cls,
+        db_path: str,
+        kuzu_num_threads: int = 0,
+        kuzu_buffer_pool_size: int = DEFAULT_KUZU_BUFFER_POOL_SIZE,
+        kuzu_max_db_size: int = DEFAULT_KUZU_MAX_DB_SIZE,
+    ) -> "LadybugAdapter":
+        """Create a LadybugAdapter running in subprocess-proxy mode."""
+        db_parent = os.path.dirname(os.path.abspath(db_path))
+        if db_parent:
+            os.makedirs(db_parent, exist_ok=True)
+
+        from cognee.infrastructure.databases.graph.kuzu.subprocess.proxy import (
+            KuzuSubprocessSession,
+            RemoteKuzuConnection,
+            RemoteKuzuDatabase,
+            install_json_extension,
+        )
+
+        session = KuzuSubprocessSession.start()
+        try:
+            install_json_extension(session, kuzu_buffer_pool_size)
+            db = RemoteKuzuDatabase(
+                session,
+                db_path=db_path,
+                buffer_pool_size=kuzu_buffer_pool_size,
+                max_num_threads=kuzu_num_threads,
+                max_db_size=kuzu_max_db_size,
+            )
+            db.init_database()
+            conn = RemoteKuzuConnection(session, db)
+            conn.load_extension("JSON")
+
+            return cls(
+                db_path=db_path,
+                kuzu_num_threads=kuzu_num_threads,
+                kuzu_buffer_pool_size=kuzu_buffer_pool_size,
+                kuzu_max_db_size=kuzu_max_db_size,
+                database=db,
+                connection=conn,
+                session=session,
+            )
+        except Exception:
+            session.shutdown(timeout=2.0)
+            raise
+
     def __init__(
         self,
         db_path: str,
@@ -252,7 +299,7 @@ class LadybugAdapter(GraphDBInterface):
                         max_db_size=self.kuzu_max_db_size,
                     )
                 except RuntimeError:
-                    from .ladybug_migrate import try_read_ladybug_storage_version
+                    from .ladybug_migrate import read_ladybug_storage_version
                     import ladybug
 
                     # An unknown version_code (None) means either a fresh path
@@ -262,7 +309,7 @@ class LadybugAdapter(GraphDBInterface):
                     # init below. Without this, ladybug>=0.12 fresh DBs raise
                     # "Could not map version_code to proper Ladybug version"
                     # because the mapping tops out at 0.11.3.
-                    ladybug_db_version = try_read_ladybug_storage_version(self.db_path)
+                    ladybug_db_version = read_ladybug_storage_version(self.db_path)
                     if (
                         ladybug_db_version is not None
                         and _version_tuple(ladybug_db_version) < (0, 15, 0)
