@@ -39,10 +39,6 @@ DEFAULT_KUZU_BUFFER_POOL_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB
 DEFAULT_KUZU_MAX_DB_SIZE = 4 * 1024 * 1024 * 1024  # 4 GB
 
 
-def _version_tuple(version: str) -> tuple[int, ...]:
-    return tuple(int(part) for part in version.split(".") if part.isdigit())
-
-
 cache_config = get_cache_config()
 if cache_config.shared_ladybug_lock:
     from cognee.infrastructure.databases.cache.get_cache_engine import get_cache_engine
@@ -299,30 +295,16 @@ class LadybugAdapter(GraphDBInterface):
                         max_db_size=self.kuzu_max_db_size,
                     )
                 except RuntimeError:
-                    from .ladybug_migrate import read_ladybug_storage_version
                     import ladybug
+                    from .ladybug_migrate import needs_migration, ladybug_migration
 
-                    # An unknown version_code (None) means either a fresh path
-                    # or a DB written by a ladybug release newer than
-                    # ladybug_version_mapping knows about. In both cases the
-                    # legacy-Kuzu migration is not applicable — just retry the
-                    # init below. Without this, ladybug>=0.12 fresh DBs raise
-                    # "Could not map version_code to proper Ladybug version"
-                    # because the mapping tops out at 0.11.3.
-                    ladybug_db_version = read_ladybug_storage_version(self.db_path)
-                    if (
-                        ladybug_db_version is not None
-                        and _version_tuple(ladybug_db_version) < (0, 15, 0)
-                        and ladybug_db_version != ladybug.__version__
-                    ):
-                        # Try to migrate legacy Kuzu database to the current Ladybug version
-                        from .ladybug_migrate import ladybug_migration
-
+                    should_migrate, old_version = needs_migration(self.db_path, ladybug.__version__)
+                    if should_migrate:
                         ladybug_migration(
                             new_db=self.db_path + "_new",
                             old_db=self.db_path,
                             new_version=ladybug.__version__,
-                            old_version=ladybug_db_version,
+                            old_version=old_version,
                             overwrite=True,
                         )
 

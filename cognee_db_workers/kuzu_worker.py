@@ -32,7 +32,25 @@ from .kuzu_protocol import (
 def _open_database(registry: HandleRegistry, req: Request) -> HandleResult:
     import ladybug
 
-    db = ladybug.Database(**req.kwargs)
+    try:
+        db = ladybug.Database(**req.kwargs)
+    except RuntimeError:
+        from .ladybug_migrate import needs_migration, ladybug_migration
+
+        db_path = req.kwargs.get("database_path", "")
+        should_migrate, old_version = needs_migration(db_path, ladybug.__version__)
+        if should_migrate:
+            ladybug_migration(
+                new_db=db_path + "_new",
+                old_db=db_path,
+                new_version=ladybug.__version__,
+                old_version=old_version,
+                overwrite=True,
+            )
+            db = ladybug.Database(**req.kwargs)
+        else:
+            raise
+
     return HandleResult(value=None, handle_id=registry.register(db))
 
 

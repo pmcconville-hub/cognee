@@ -16,7 +16,7 @@ def test_run_migration_step_isolates_legacy_import_path(monkeypatch):
         return subprocess.CompletedProcess(args, 0, "", "")
 
     monkeypatch.setattr(
-        "cognee.infrastructure.databases.graph.ladybug.ladybug_migrate.subprocess.run",
+        "cognee_db_workers.ladybug_migrate.subprocess.run",
         fake_run,
     )
 
