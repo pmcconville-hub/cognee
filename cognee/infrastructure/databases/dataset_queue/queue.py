@@ -54,13 +54,13 @@ class DatasetQueueSettings:
     __slots__ = ("enabled", "max_concurrent")
 
     def __init__(self, enabled: bool, max_concurrent: int) -> None:
-        self.enabled = True
+        self.enabled = enabled
         self.max_concurrent = max_concurrent
 
 
 def get_dataset_queue_settings() -> DatasetQueueSettings:
     """Return effective settings. Test mock seam."""
-    raw = os.getenv("DATASET_QUEUE_ENABLED", "").strip().lower()
+    raw = os.getenv("DATASET_QUEUE_ENABLED", "true").strip().lower()
     enabled = raw in TRUE_VALUES
 
     max_concurrent = os.getenv("DATASET_QUEUE_MAX_CONCURRENT", None)
