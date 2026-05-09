@@ -19,7 +19,7 @@ Requirements for the generated schema:
    - Object reference: {"$ref": "#/$defs/TypeName"} for one-to-one
    - Array of references: {"type": "array", "items": {"$ref": "#/$defs/TypeName"}} for one-to-many
 5. Use snake_case for property/relationship names.
-6. Keep the schema minimal — only include types and relationships clearly supported by the text.
+6. Be thorough — include all distinct entity types and relationships clearly supported by the text. Aim for comprehensive coverage of the domain rather than a minimal schema.
 7. Do not include infrastructure fields (id, created_at, version, etc.) — only domain fields.
 8. Prefer clear, descriptive type names that reflect the domain.
 
