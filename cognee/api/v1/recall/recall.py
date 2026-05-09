@@ -5,10 +5,10 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 from typing_extensions import TypedDict, Unpack
 
-from cognee.infrastructure.databases.cache import SessionAgentTraceEntry, SessionQAEntry
-from cognee.infrastructure.databases.exceptions import DatabaseNotCreatedError
 from cognee.context_global_variables import set_session_user_context_variable
 from cognee.exceptions import CogneeValidationError
+from cognee.infrastructure.databases.cache import SessionAgentTraceEntry, SessionQAEntry
+from cognee.infrastructure.databases.exceptions import DatabaseNotCreatedError
 from cognee.memory.entries import normalize_scope
 from cognee.modules.data.exceptions import DatasetNotFoundError
 from cognee.modules.data.methods import get_authorized_existing_datasets
@@ -45,7 +45,6 @@ _MIN_WORD_LEN = 2
 class RecallKwargs(TypedDict, total=False):
     """Power-user overrides for recall(). Most users never need these."""
 
-    dataset_ids: list[UUID]
     system_prompt: str
     system_prompt_path: str
     node_name: list[str]
@@ -317,6 +316,7 @@ async def recall(
     query_type: SearchType | None = None,
     *,
     datasets: list[str] | None = None,
+    dataset_ids: list[UUID] | None = None,
     top_k: int = 10,
     auto_route: bool = True,
     scope: str | list[str] | None = None,
@@ -342,6 +342,7 @@ async def recall(
         query_text: Natural-language query.
         query_type: Search strategy. When provided, the router is bypassed.
         datasets: Dataset names to search within.
+        dataset_ids: Alternative to datasets - use specific UUID identifiers. If set this takes precedence over datasets.
         top_k: Maximum results to return (default *10*).
         auto_route: If True and query_type is None, classify the query
             automatically. If False, fall back to GRAPH_COMPLETION.
@@ -371,7 +372,7 @@ async def recall(
     # Explicit ``scope`` values bypass this entirely.
     resolved_scope = normalize_scope(scope)
     if resolved_scope == ["auto"]:
-        if session_id and not datasets and query_type is None:
+        if session_id and not datasets and not dataset_ids and query_type is None:
             sources = ["session", "graph"]
             auto_fallthrough = True  # session hit short-circuits graph
         elif session_id and query_type is None:
@@ -416,6 +417,7 @@ async def recall(
                 query_text,
                 query_type,
                 datasets=datasets,
+                dataset_ids=dataset_ids,
                 top_k=top_k,
                 scope=scope,
                 **kwargs,
@@ -458,7 +460,7 @@ async def recall(
             return list(await _fetch_graph_context(session_id=session_id, user=user))
 
         async def _run_graph() -> list[RecallResponse]:
-            nonlocal user
+            nonlocal user, dataset_ids
 
             from cognee.modules.recall.methods.normalize_search_payload import (
                 normalize_search_payload,
@@ -501,15 +503,17 @@ async def recall(
                 str(local_query_type.value) if local_query_type else "unknown",
             )
 
-            # Transform string based datasets to UUID - String based datasets can only be found for current user
-            dataset_ids: list[UUID] | None = None
-            if datasets is not None:
-                dataset_ids = [
-                    dataset.id
-                    for dataset in await get_authorized_existing_datasets(datasets, "read", user)
-                ]
-                if not dataset_ids:
-                    raise DatasetNotFoundError(message="No datasets found.")
+            if dataset_ids is None:
+                # Transform string based datasets to UUID - String based datasets can only be found for current user
+                if datasets is not None:
+                    dataset_ids = [
+                        dataset.id
+                        for dataset in await get_authorized_existing_datasets(
+                            datasets, "read", user
+                        )
+                    ]
+                    if not dataset_ids:
+                        raise DatasetNotFoundError(message="No datasets found.")
 
             graph_results = await authorized_search(
                 query_text=query_text,
