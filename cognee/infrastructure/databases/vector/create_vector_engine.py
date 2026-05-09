@@ -260,26 +260,10 @@ def _create_vector_engine(
         from .lancedb.LanceDBAdapter import LanceDBAdapter
 
         if vector_db_subprocess_enabled:
-            from .lancedb.subprocess.proxy import (
-                LanceDBSubprocessSession,
-                RemoteLanceDBConnection,
-            )
-
-            session = LanceDBSubprocessSession.start()
-            try:
-                remote_conn = RemoteLanceDBConnection(
-                    session, url=vector_db_url, api_key=vector_db_key
-                )
-            except Exception:
-                session.shutdown(timeout=2.0)
-                raise
-
-            return LanceDBAdapter(
+            return LanceDBAdapter.create_subprocess(
                 url=vector_db_url,
                 api_key=vector_db_key,
                 embedding_engine=embedding_engine,
-                connection=remote_conn,
-                session=session,
             )
 
         return LanceDBAdapter(

@@ -101,6 +101,34 @@ class LanceDBAdapter(VectorDBInterface):
     _lance_datapoint_class_cache: "OrderedDict" = OrderedDict()
     _lance_cache_lock = threading.Lock()
 
+    @classmethod
+    def create_subprocess(
+        cls,
+        url: Optional[str],
+        api_key: Optional[str],
+        embedding_engine: "EmbeddingEngine",
+    ) -> "LanceDBAdapter":
+        """Create a LanceDBAdapter running in subprocess-proxy mode."""
+        from .subprocess.proxy import (
+            LanceDBSubprocessSession,
+            RemoteLanceDBConnection,
+        )
+
+        session = LanceDBSubprocessSession.start()
+        try:
+            remote_conn = RemoteLanceDBConnection(session, url=url, api_key=api_key)
+        except Exception:
+            session.shutdown(timeout=2.0)
+            raise
+
+        return cls(
+            url=url,
+            api_key=api_key,
+            embedding_engine=embedding_engine,
+            connection=remote_conn,
+            session=session,
+        )
+
     def __init__(
         self,
         url: Optional[str],
