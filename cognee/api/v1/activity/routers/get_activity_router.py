@@ -165,15 +165,12 @@ def get_activity_router() -> APIRouter:
             key_counts = {str(row.user_id): row.key_count for row in keys_result}
 
             # Get latest data ingestion per user
-            data_created_q = (
-                select(Data.owner_id, func.max(Data.created_at).label("ts"))
-                .group_by(Data.owner_id)
+            data_created_q = select(Data.owner_id, func.max(Data.created_at).label("ts")).group_by(
+                Data.owner_id
             )
             data_created_result = await session.execute(data_created_q)
             last_active_map = {
-                str(row.owner_id): row.ts
-                for row in data_created_result
-                if row.owner_id
+                str(row.owner_id): row.ts for row in data_created_result if row.owner_id
             }
 
             # Get latest data access per user
@@ -191,9 +188,8 @@ def get_activity_router() -> APIRouter:
                     last_active_map[uid] = row.ts
 
             # Get latest search query per user
-            search_q = (
-                select(Query.user_id, func.max(Query.created_at).label("ts"))
-                .group_by(Query.user_id)
+            search_q = select(Query.user_id, func.max(Query.created_at).label("ts")).group_by(
+                Query.user_id
             )
             search_result = await session.execute(search_q)
             for row in search_result:

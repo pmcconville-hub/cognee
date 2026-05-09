@@ -150,6 +150,7 @@ evals = [
     "pandas>=2.2.2,<3.0.0",
     "matplotlib>=3.8.3,<4",
     "scikit-learn>=1.6.1,<2",
+    "locust>=2.0.0,<3",
 ]
 
 graphiti = ["graphiti-core>=0.28.0"]
