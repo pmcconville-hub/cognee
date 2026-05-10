@@ -11,12 +11,16 @@ Test Coverage:
 import os
 import pathlib
 import pytest
+import pytest_asyncio
 from uuid import UUID, uuid4, uuid5, NAMESPACE_OID
 
 import cognee
 from cognee.context_global_variables import set_database_global_context_variables
 from cognee.infrastructure.databases.graph import get_graph_engine
 from cognee.infrastructure.databases.relational import get_relational_engine
+from cognee.infrastructure.databases.relational.create_relational_engine import (
+    create_relational_engine,
+)
 from cognee.modules.data.methods import create_dataset, create_authorized_dataset
 from cognee.modules.engine.operations.setup import setup
 from cognee.modules.graph.methods import (
@@ -31,6 +35,21 @@ from cognee.shared.logging_utils import get_logger
 from sqlalchemy import select
 
 logger = get_logger()
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _dispose_relational_engine_after_test():
+    yield
+
+    try:
+        db_engine = get_relational_engine()
+        engine = getattr(db_engine, "engine", None)
+        if engine is not None:
+            await engine.dispose(close=True)
+    except Exception:
+        pass
+
+    create_relational_engine.cache_clear()
 
 
 @pytest.mark.asyncio

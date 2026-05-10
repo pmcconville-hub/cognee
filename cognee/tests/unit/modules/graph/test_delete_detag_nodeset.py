@@ -6,15 +6,17 @@ orchestration wiring without needing a live Neo4j or Postgres.
 
 from __future__ import annotations
 
+import importlib
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pytest
 
-from cognee.modules.graph.methods.delete_from_graph_and_vector import (
-    delete_from_graph_and_vector,
+delete_from_graph_and_vector_module = importlib.import_module(
+    "cognee.modules.graph.methods.delete_from_graph_and_vector"
 )
+delete_from_graph_and_vector = delete_from_graph_and_vector_module.delete_from_graph_and_vector
 
 
 def _node(node_type: str, label: str | None = None):
@@ -38,20 +40,24 @@ async def test_detag_called_with_removed_nodeset_names():
     vector_engine = AsyncMock()
 
     with (
-        patch(
-            "cognee.modules.graph.methods.delete_from_graph_and_vector.get_graph_engine",
+        patch.object(
+            delete_from_graph_and_vector_module,
+            "get_graph_engine",
             AsyncMock(return_value=graph_engine),
         ),
-        patch(
-            "cognee.modules.graph.methods.delete_from_graph_and_vector.get_vector_engine",
+        patch.object(
+            delete_from_graph_and_vector_module,
+            "get_vector_engine",
             lambda: vector_engine,
         ),
-        patch(
-            "cognee.modules.graph.methods.delete_from_graph_and_vector.mark_ledger_nodes_as_deleted",
+        patch.object(
+            delete_from_graph_and_vector_module,
+            "mark_ledger_nodes_as_deleted",
             AsyncMock(),
         ),
-        patch(
-            "cognee.modules.graph.methods.delete_from_graph_and_vector.mark_ledger_edges_as_deleted",
+        patch.object(
+            delete_from_graph_and_vector_module,
+            "mark_ledger_edges_as_deleted",
             AsyncMock(),
         ),
     ):
@@ -76,20 +82,24 @@ async def test_detag_skipped_when_no_nodeset_in_batch():
     vector_engine = AsyncMock()
 
     with (
-        patch(
-            "cognee.modules.graph.methods.delete_from_graph_and_vector.get_graph_engine",
+        patch.object(
+            delete_from_graph_and_vector_module,
+            "get_graph_engine",
             AsyncMock(return_value=graph_engine),
         ),
-        patch(
-            "cognee.modules.graph.methods.delete_from_graph_and_vector.get_vector_engine",
+        patch.object(
+            delete_from_graph_and_vector_module,
+            "get_vector_engine",
             lambda: vector_engine,
         ),
-        patch(
-            "cognee.modules.graph.methods.delete_from_graph_and_vector.mark_ledger_nodes_as_deleted",
+        patch.object(
+            delete_from_graph_and_vector_module,
+            "mark_ledger_nodes_as_deleted",
             AsyncMock(),
         ),
-        patch(
-            "cognee.modules.graph.methods.delete_from_graph_and_vector.mark_ledger_edges_as_deleted",
+        patch.object(
+            delete_from_graph_and_vector_module,
+            "mark_ledger_edges_as_deleted",
             AsyncMock(),
         ),
     ):
