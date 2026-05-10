@@ -7,12 +7,11 @@ from cognee.infrastructure.databases.relational import get_relational_engine
 from cognee.modules.users.exceptions import (
     UserNotFoundError,
     RoleNotFoundError,
-    PermissionDeniedError,
 )
+from cognee.modules.users.permissions.methods import has_user_management_permission
 from cognee.modules.users.models import (
     User,
     Role,
-    Tenant,
     UserRole,
 )
 
@@ -36,16 +35,7 @@ async def remove_user_from_role(user_id: UUID, role_id: UUID, owner_id: UUID):
         if not role:
             raise RoleNotFoundError
 
-        tenant = (
-            (await session.execute(select(Tenant).where(Tenant.id == role.tenant_id)))
-            .scalars()
-            .first()
-        )
-
-        if tenant.owner_id != owner_id:
-            raise PermissionDeniedError(
-                message="User submitting request does not have permission to remove user from role."
-            )
+        await has_user_management_permission(requester_id=owner_id, tenant_id=role.tenant_id)
 
         await session.execute(
             delete(UserRole).where(

@@ -114,7 +114,9 @@ def get_permissions_router() -> APIRouter:
             },
         )
 
-        from cognee.modules.users.permissions.methods import authorized_revoke_permission_on_datasets
+        from cognee.modules.users.permissions.methods import (
+            authorized_revoke_permission_on_datasets,
+        )
 
         await authorized_revoke_permission_on_datasets(
             principal_id,
@@ -171,14 +173,13 @@ def get_permissions_router() -> APIRouter:
         )
 
     @permissions_router.delete("/roles/{role_id}")
-    async def delete_role_endpoint(
-        role_id: UUID, user: User = Depends(get_authenticated_user)
-    ):
+    async def delete_role_endpoint(role_id: UUID, user: User = Depends(get_authenticated_user)):
         """
         Delete a role and all its associations.
 
         Removes all user-role memberships and ACL entries for this role,
-        then deletes the role. The authenticated user must be the tenant owner.
+        then deletes the role. The authenticated user must be able to manage
+        users in the tenant.
 
         ## Path Parameters
         - **role_id** (UUID): The UUID of the role to delete
@@ -249,7 +250,7 @@ def get_permissions_router() -> APIRouter:
         """
         Remove a user from a role.
 
-        The authenticated user must be the tenant owner.
+        The authenticated user must be able to manage users in the tenant.
 
         ## Path Parameters
         - **user_id** (UUID): The UUID of the user to remove from the role
@@ -268,7 +269,9 @@ def get_permissions_router() -> APIRouter:
             },
         )
 
-        from cognee.modules.users.roles.methods import remove_user_from_role as remove_user_from_role_method
+        from cognee.modules.users.roles.methods import (
+            remove_user_from_role as remove_user_from_role_method,
+        )
 
         await remove_user_from_role_method(user_id=user_id, role_id=role_id, owner_id=user.id)
 

@@ -5,13 +5,13 @@ from sqlalchemy import delete
 
 from cognee.infrastructure.databases.relational import get_relational_engine
 from cognee.infrastructure.databases.exceptions import EntityNotFoundError
-from cognee.modules.users.exceptions import PermissionDeniedError
+from cognee.modules.users.permissions.methods import has_user_management_permission
 from cognee.modules.users.models import (
     Role,
-    Tenant,
     UserRole,
 )
 from cognee.modules.users.models.ACL import ACL
+from cognee.modules.users.models.Principal import Principal
 
 
 async def delete_role(role_id: UUID, owner_id: UUID):
@@ -29,16 +29,7 @@ async def delete_role(role_id: UUID, owner_id: UUID):
         if not role:
             raise EntityNotFoundError(message="Role not found.")
 
-        tenant = (
-            (await session.execute(select(Tenant).where(Tenant.id == role.tenant_id)))
-            .scalars()
-            .first()
-        )
-
-        if tenant.owner_id != owner_id:
-            raise PermissionDeniedError(
-                message="User submitting request does not have permission to delete this role."
-            )
+        await has_user_management_permission(requester_id=owner_id, tenant_id=role.tenant_id)
 
         # Remove all user-role associations
         await session.execute(delete(UserRole).where(UserRole.role_id == role_id))
@@ -46,7 +37,8 @@ async def delete_role(role_id: UUID, owner_id: UUID):
         # Remove all ACL entries for this role's principal
         await session.execute(delete(ACL).where(ACL.principal_id == role_id))
 
-        # Delete the role (cascade will handle the principal)
+        # Delete both joined-table rows so the base Principal is not orphaned.
         await session.execute(delete(Role).where(Role.id == role_id))
+        await session.execute(delete(Principal).where(Principal.id == role_id))
 
         await session.commit()
