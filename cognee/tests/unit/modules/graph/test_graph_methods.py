@@ -428,17 +428,13 @@ async def test_get_global_data_related_nodes_scopes_by_dataset():
         "Un-scoped legacy query should still return both slugs (demonstrates the bug)"
     )
 
-    alfa_scope = await get_global_data_related_nodes(
-        maria_data_id, dataset_id=alfa_dataset_id
-    )
+    alfa_scope = await get_global_data_related_nodes(maria_data_id, dataset_id=alfa_dataset_id)
     alfa_scope_slugs = {str(n.slug) for n in alfa_scope}
     assert alfa_scope_slugs == {str(alfa_only_slug)}, (
         f"Scoped to alfa should only return alfa-exclusive slug, got {alfa_scope_slugs}"
     )
 
-    beta_scope = await get_global_data_related_nodes(
-        maria_data_id, dataset_id=beta_dataset_id
-    )
+    beta_scope = await get_global_data_related_nodes(maria_data_id, dataset_id=beta_dataset_id)
     beta_scope_slugs = {str(n.slug) for n in beta_scope}
     assert beta_scope_slugs == set(), (
         f"Scoped to beta should return nothing (shared slug co-owned by alfa), got {beta_scope_slugs}"

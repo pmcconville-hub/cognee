@@ -168,9 +168,7 @@ async def test_remove_belongs_to_set_tags_scoped_by_node_ids():
     try:
         await adapter.add_nodes(
             [
-                _TaggedPoint(
-                    id=targeted_id, text="shared", belongs_to_set=["alfa", "beta"]
-                ),
+                _TaggedPoint(id=targeted_id, text="shared", belongs_to_set=["alfa", "beta"]),
                 _TaggedPoint(
                     id=untouched_same_tag_id,
                     text="mock_only",
@@ -214,9 +212,7 @@ async def test_remove_belongs_to_set_tags_prunes_edges_to_surviving_nodeset():
 
         await adapter.add_nodes(
             [
-                _TaggedPoint(
-                    id=node_id, text="shared", belongs_to_set=["alfa", "beta"]
-                ),
+                _TaggedPoint(id=node_id, text="shared", belongs_to_set=["alfa", "beta"]),
                 _TaggedPoint(
                     id=untouched_same_tag_id,
                     text="mock_only",

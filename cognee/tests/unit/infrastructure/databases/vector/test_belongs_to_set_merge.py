@@ -207,12 +207,8 @@ async def test_remove_belongs_to_set_tags_scoped_by_node_ids(tmp_path):
     targeted_id = str(uuid4())
     untouched_same_tag_id = str(uuid4())
 
-    targeted = _TaggedPoint(
-        id=targeted_id, text="shared", belongs_to_set=["alfa", "beta"]
-    )
-    untouched = _TaggedPoint(
-        id=untouched_same_tag_id, text="mock_only", belongs_to_set=["alfa"]
-    )
+    targeted = _TaggedPoint(id=targeted_id, text="shared", belongs_to_set=["alfa", "beta"])
+    untouched = _TaggedPoint(id=untouched_same_tag_id, text="mock_only", belongs_to_set=["alfa"])
 
     await adapter.create_collection(collection, type(targeted))
     await adapter.create_data_points(collection, [targeted, untouched])

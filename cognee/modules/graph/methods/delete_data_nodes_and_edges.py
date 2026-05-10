@@ -58,9 +58,7 @@ async def delete_data_nodes_and_edges(dataset_id: UUID, data_id: UUID, user_id: 
     shared_slugs_to_detag: list = []
     dataset_name = None
     if not is_multi_user_support_possible():
-        shared_slugs_to_detag = await get_shared_slugs_losing_dataset_anchor(
-            dataset_id, data_id
-        )
+        shared_slugs_to_detag = await get_shared_slugs_losing_dataset_anchor(dataset_id, data_id)
         if shared_slugs_to_detag:
             dataset_name = await _get_dataset_name(dataset_id)
 
