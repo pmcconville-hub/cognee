@@ -2,6 +2,7 @@ import asyncio
 import copy
 import inspect
 import threading
+import types
 from collections import OrderedDict
 import types
 from os import path
