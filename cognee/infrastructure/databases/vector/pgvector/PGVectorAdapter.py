@@ -30,6 +30,7 @@ from ..embeddings.EmbeddingEngine import EmbeddingEngine
 from .serialize_data import serialize_data
 
 logger = get_logger("PGVectorAdapter")
+QUERY_BATCH_SIZE = 1000
 
 
 class IndexSchema(DataPoint):
@@ -267,11 +268,13 @@ class PGVectorAdapter(SQLAlchemyAdapter, VectorDBInterface):
                 }
 
             # session.add_all(pgvector_data_points)
-            insert_statement = insert(PGVectorDataPoint).values(
-                [to_dict(data_point) for data_point in pgvector_data_points]
-            )
-            insert_statement = insert_statement.on_conflict_do_nothing(index_elements=["id"])
-            await session.execute(insert_statement)
+            point_dicts = [to_dict(data_point) for data_point in pgvector_data_points]
+
+            for start_index in range(0, len(point_dicts), QUERY_BATCH_SIZE):
+                point_batch = point_dicts[start_index : start_index + QUERY_BATCH_SIZE]
+                insert_statement = insert(PGVectorDataPoint).values(point_batch)
+                insert_statement = insert_statement.on_conflict_do_nothing(index_elements=["id"])
+                await session.execute(insert_statement)
             await session.commit()
 
     async def create_vector_index(self, index_name: str, index_property_name: str):
@@ -324,14 +327,25 @@ class PGVectorAdapter(SQLAlchemyAdapter, VectorDBInterface):
             return []
 
         async with self.get_async_session() as session:
-            results = await session.execute(
-                select(PGVectorDataPoint).where(PGVectorDataPoint.c.id.in_(data_point_ids))
-            )
-            results = results.all()
+            results = []
+            for start_index in range(0, len(data_point_ids), QUERY_BATCH_SIZE):
+                id_batch = data_point_ids[start_index : start_index + QUERY_BATCH_SIZE]
+                batch_results = await session.execute(
+                    select(PGVectorDataPoint).where(PGVectorDataPoint.c.id.in_(id_batch))
+                )
+                results.extend(batch_results.all())
+
+            seen_ids = set()
+            unique_results = []
+            for result in results:
+                if result.id in seen_ids:
+                    continue
+                seen_ids.add(result.id)
+                unique_results.append(result)
 
             return [
                 ScoredResult(id=parse_id(result.id), payload=result.payload, score=0)
-                for result in results
+                for result in unique_results
             ]
 
     async def search(
@@ -473,9 +487,18 @@ class PGVectorAdapter(SQLAlchemyAdapter, VectorDBInterface):
         async with self.get_async_session() as session:
             # Get PGVectorDataPoint Table from database
             PGVectorDataPoint = await self.get_table(collection_name)
-            results = await session.execute(
-                delete(PGVectorDataPoint).where(PGVectorDataPoint.c.id.in_(data_point_ids))
-            )
+
+            results = None
+            if not data_point_ids:
+                results = await session.execute(
+                    delete(PGVectorDataPoint).where(PGVectorDataPoint.c.id.in_(data_point_ids))
+                )
+            else:
+                for start_index in range(0, len(data_point_ids), QUERY_BATCH_SIZE):
+                    id_batch = data_point_ids[start_index : start_index + QUERY_BATCH_SIZE]
+                    results = await session.execute(
+                        delete(PGVectorDataPoint).where(PGVectorDataPoint.c.id.in_(id_batch))
+                    )
             await session.commit()
             return results
 
