@@ -212,12 +212,20 @@ def get_activity_router() -> APIRouter:
             # Internal email format: "sanitized-name+{parent_user_id}@cognee.agent"
             # The +{parent_user_id} suffix ensures uniqueness across users but
             # must be stripped for display purposes.
-            # rsplit("+", 1) splits on the last "+" which is always the one
-            # before the user ID (UUIDs never contain "+").
+            # Legacy agents used "-" throughout, so we fall back to rsplit("-", 1)
+            # when no "+" is present and the suffix looks like a hex UUID fragment.
             if is_agent:
                 local_part = email.split("@")[0]
                 if "+" in local_part:
+                    # Current format: name+user_id
                     display_name, agent_short_id = local_part.rsplit("+", 1)
+                elif "-" in local_part:
+                    # Legacy format: name-part-of-uuid — strip UUID suffix
+                    prefix, suffix = local_part.rsplit("-", 1)
+                    if len(suffix) >= 8 and all(c in "0123456789abcdef" for c in suffix):
+                        display_name, agent_short_id = prefix, suffix
+                    else:
+                        display_name, agent_short_id = local_part, ""
                 else:
                     display_name, agent_short_id = local_part, ""
                 agent_type = display_name.replace("-", " ").replace("_", " ")
