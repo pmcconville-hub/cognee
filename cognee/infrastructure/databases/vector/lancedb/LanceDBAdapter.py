@@ -4,7 +4,6 @@ import inspect
 import threading
 import types
 from collections import OrderedDict
-import types
 from os import path
 from uuid import UUID
 from enum import Enum

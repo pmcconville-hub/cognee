@@ -453,7 +453,7 @@ class LadybugAdapter(GraphDBInterface):
                             with self._counter_lock:
                                 self.open_connections += 1
                                 self._all_queries_drained.clear()
-                        logger.info(f"Open connections after open: {self.open_connections}")
+                        logger.debug(f"Open connections after open: {self.open_connections}")
                         try:
                             # Submit + check-closed atomically under
                             # ``_lifecycle_lock``. See top-of-method note.
