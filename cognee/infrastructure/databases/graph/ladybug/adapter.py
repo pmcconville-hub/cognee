@@ -77,6 +77,20 @@ class LadybugAdapter(GraphDBInterface):
         session = KuzuSubprocessSession.start()
         try:
             install_json_extension(session, kuzu_buffer_pool_size)
+
+            if cache_config.shared_ladybug_lock:
+                # Don't open persistent handles — the per-query Redis lock
+                # path will open/close them via _rebuild_subprocess_proxies
+                # and _drop_native_resources on each query.
+                return cls(
+                    db_path=db_path,
+                    kuzu_num_threads=kuzu_num_threads,
+                    kuzu_buffer_pool_size=kuzu_buffer_pool_size,
+                    kuzu_max_db_size=kuzu_max_db_size,
+                    subprocess_mode=True,
+                    session=session,
+                )
+
             db = RemoteKuzuDatabase(
                 session,
                 db_path=db_path,
@@ -93,6 +107,7 @@ class LadybugAdapter(GraphDBInterface):
                 kuzu_num_threads=kuzu_num_threads,
                 kuzu_buffer_pool_size=kuzu_buffer_pool_size,
                 kuzu_max_db_size=kuzu_max_db_size,
+                subprocess_mode=True,
                 database=db,
                 connection=conn,
                 session=session,
@@ -108,6 +123,7 @@ class LadybugAdapter(GraphDBInterface):
         kuzu_buffer_pool_size: int = DEFAULT_KUZU_BUFFER_POOL_SIZE,
         kuzu_max_db_size: int = DEFAULT_KUZU_MAX_DB_SIZE,
         *,
+        subprocess_mode: bool = False,
         database: Optional[Any] = None,
         connection: Optional[Any] = None,
         session: Optional[Any] = None,
@@ -127,43 +143,37 @@ class LadybugAdapter(GraphDBInterface):
             Maximum on-disk database size in bytes. Configurable via the
             ``KUZU_MAX_DB_SIZE`` env var (see ``GraphConfig``); some users
             need this above the default 4 GB for large graphs.
-        database, connection, session:
-            Optional pre-built Database/Connection and a subprocess session.
-            When supplied, the adapter runs in subprocess-proxy mode: the
+        subprocess_mode:
+            When True, the adapter runs in subprocess-proxy mode: the
             native ladybug.Database/Connection live in a dedicated worker
-            process and ``database``/``connection`` are main-side proxies.
-            After a transient drop (e.g. ``delete_graph``) the adapter
-            rebuilds proxies lazily against the surviving ``session``;
-            after ``close()`` the session is zeroed and the adapter is a
-            permanent error state — its lifecycle is owned by the factory
-            + LRU cache.
-
-            ``database``, ``connection``, and ``session`` must be provided
-            together (subprocess mode) or all left ``None`` (local mode).
-            Mixing them creates an adapter that cannot cleanly close — e.g.
-            ``connection`` without ``session`` leaks a worker, ``session``
-            without the others has no proxies to drive. Reject up front.
+            process. Requires ``session``. When ``shared_ladybug_lock`` is
+            disabled, ``database`` and ``connection`` must also be provided
+            (persistent handles). When ``shared_ladybug_lock`` is enabled,
+            handles are opened/closed per query via the Redis lock path,
+            so ``database`` and ``connection`` are left None.
+        database, connection:
+            Pre-built Database/Connection proxies for the subprocess worker.
+        session:
+            The subprocess session that owns the worker process. After a
+            transient drop (e.g. ``delete_graph``) the adapter rebuilds
+            proxies lazily against the surviving session; after ``close()``
+            the session is zeroed and the adapter is in a permanent error
+            state.
         """
-        injection_count = sum(x is not None for x in (database, connection, session))
-        if injection_count not in (0, 3):
-            raise ValueError(
-                "LadybugAdapter requires all of `database`, `connection`, and "
-                "`session` for subprocess mode, or all left `None` for local "
-                "mode."
-            )
+        if subprocess_mode:
+            if session is None:
+                raise ValueError("subprocess_mode requires a session.")
+            if not cache_config.shared_ladybug_lock and (database is None or connection is None):
+                raise ValueError(
+                    "subprocess_mode without shared_ladybug_lock requires database and connection."
+                )
         self.open_connections = 0
-        self.db_path = db_path  # Path for the database directory
+        self.db_path = db_path
         self.kuzu_num_threads = kuzu_num_threads
         self.kuzu_buffer_pool_size = kuzu_buffer_pool_size
         self.kuzu_max_db_size = kuzu_max_db_size
         self._session = session
-        injected = injection_count == 3
-        # Remember that this adapter was constructed in subprocess-proxy mode.
-        # After close(), we must NOT silently fall through to a local
-        # ladybug.Database re-init on the same db_path — that would conflict with
-        # any surviving subprocess holding the Ladybug file lock. If a caller
-        # tries to reuse a closed subprocess-mode adapter we raise explicitly.
-        self._subprocess_mode = injected
+        self._subprocess_mode = subprocess_mode
         self._permanently_closed = False
         self.db: Optional[Database] = database
         self.connection: Optional[Connection] = connection
@@ -178,7 +188,7 @@ class LadybugAdapter(GraphDBInterface):
                 lock_key="ladybug-lock-" + str(uuid5(NAMESPACE_OID, db_path))
             )
         else:
-            if injected:
+            if subprocess_mode:
                 self._ensure_schema()
             else:
                 self._initialize_connection()
@@ -474,7 +484,7 @@ class LadybugAdapter(GraphDBInterface):
                                 self.open_connections -= 1
                                 if self.open_connections == 0:
                                     self._all_queries_drained.set()
-                            logger.info(f"Open connections after close: {self.open_connections}")
+                            logger.debug(f"Open connections after close: {self.open_connections}")
                             # Drop native handles BEFORE releasing the Redis
                             # lock so the next holder can take the on-disk
                             # file lock without fighting us. Drain first for
@@ -485,7 +495,10 @@ class LadybugAdapter(GraphDBInterface):
                             # change to redis-lock reentrancy.
                             async with self._connection_lock:
                                 await self._drain_in_flight_queries()
-                                self._drop_native_resources()
+                                if self._subprocess_mode:
+                                    await asyncio.to_thread(self._drop_native_resources)
+                                else:
+                                    self._drop_native_resources()
                     finally:
                         # ``release_lock()`` is also sync and does Redis
                         # I/O — offload for symmetry with the acquire path.

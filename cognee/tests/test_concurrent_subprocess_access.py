@@ -19,16 +19,6 @@ concurrent subprocess access.
 
 
 async def concurrent_subprocess_access():
-    data_directory_path = str(
-        pathlib.Path(
-            os.path.join(pathlib.Path(__file__).parent, ".data_storage/concurrent_tasks")
-        ).resolve()
-    )
-    cognee_directory_path = str(
-        pathlib.Path(
-            os.path.join(pathlib.Path(__file__).parent, ".cognee_system/concurrent_tasks")
-        ).resolve()
-    )
 
     subprocess_directory_path = str(
         pathlib.Path(os.path.join(pathlib.Path(__file__).parent, "subprocesses/")).resolve()
@@ -36,9 +26,6 @@ async def concurrent_subprocess_access():
 
     writer_path = subprocess_directory_path + "/writer.py"
     reader_path = subprocess_directory_path + "/reader.py"
-
-    cognee.config.data_root_directory(data_directory_path)
-    cognee.config.system_root_directory(cognee_directory_path)
 
     await cognee.prune.prune_data()
     await cognee.prune.prune_system(metadata=True)
