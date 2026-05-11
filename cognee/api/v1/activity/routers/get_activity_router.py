@@ -212,12 +212,16 @@ def get_activity_router() -> APIRouter:
             # Internal email format: "sanitized-name++{parent_user_id}@cognee.agent"
             # The ++{parent_user_id} suffix ensures uniqueness across users but
             # must be stripped for display purposes.
+            # Backwards compatibility: also handle legacy "+" separator.
             if is_agent:
                 local_part = email.split("@")[0]
-                # Strip the ++userId suffix used for uniqueness
-                display_name = local_part.split("++")[0]
+                if "++" in local_part:
+                    display_name, agent_short_id = local_part.split("++", 1)
+                elif "+" in local_part:
+                    display_name, agent_short_id = local_part.split("+", 1)
+                else:
+                    display_name, agent_short_id = local_part, ""
                 agent_type = display_name.replace("-", " ").replace("_", " ")
-                agent_short_id = local_part.split("++")[1] if "++" in local_part else ""
             else:
                 agent_type = "Human User" if is_default else email.split("@")[0]
                 agent_short_id = ""
