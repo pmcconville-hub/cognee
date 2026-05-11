@@ -308,6 +308,13 @@ class LadybugAdapter(GraphDBInterface):
                             overwrite=True,
                         )
 
+                    self.db = Database(
+                        self.db_path,
+                        buffer_pool_size=self.kuzu_buffer_pool_size,
+                        max_num_threads=self.kuzu_num_threads,
+                        max_db_size=self.kuzu_max_db_size,
+                    )
+
             self.db.init_database()
             self.connection = Connection(self.db)
 
