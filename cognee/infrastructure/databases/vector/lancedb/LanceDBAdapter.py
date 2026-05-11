@@ -2,6 +2,7 @@ import asyncio
 import copy
 import inspect
 import threading
+import types
 from collections import OrderedDict
 from os import path
 from uuid import UUID
@@ -734,7 +735,7 @@ class LanceDBAdapter(VectorDBInterface):
         if str(origin).endswith("Literal"):
             return args[0] if args else _NO_DEFAULT
 
-        if origin is Union:
+        if origin in (Union, types.UnionType):
             non_none_args = [arg for arg in args if arg is not type(None)]
             if len(non_none_args) != len(args):
                 return None
