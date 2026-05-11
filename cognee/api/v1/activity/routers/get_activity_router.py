@@ -209,12 +209,15 @@ def get_activity_router() -> APIRouter:
             is_default = email == "default_user@example.com"
 
             # Parse agent type from email
-            # The +{parent_user_id} suffix ensures agent name uniqueness across users
+            # Internal email format: "sanitized-name++{parent_user_id}@cognee.agent"
+            # The ++{parent_user_id} suffix ensures uniqueness across users but
+            # must be stripped for display purposes.
             if is_agent:
                 local_part = email.split("@")[0]
-                parts = local_part.rsplit("-", 1)
-                agent_type = parts[0].replace("-", " ").replace("_", " ") if parts else local_part
-                agent_short_id = parts[1] if len(parts) > 1 else ""
+                # Strip the ++userId suffix used for uniqueness
+                display_name = local_part.split("++")[0]
+                agent_type = display_name.replace("-", " ").replace("_", " ")
+                agent_short_id = local_part.split("++")[1] if "++" in local_part else ""
             else:
                 agent_type = "Human User" if is_default else email.split("@")[0]
                 agent_short_id = ""
