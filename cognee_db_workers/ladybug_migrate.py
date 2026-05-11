@@ -13,6 +13,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import warnings
 
 
 ladybug_version_mapping: dict[int, str] = {
@@ -86,31 +87,83 @@ def _package_for_version(version: str) -> tuple[str, str]:
     return package_name, module_name
 
 
-def ensure_env(version: str, export_dir) -> tuple[str, str]:
-    """
-    Create a venv for a package version and return its python executable and module name.
-    """
-    # Use temp directory to create venv
-    package_name, module_name = _package_for_version(version)
-    envs_dir = os.path.join(export_dir, ".ladybug_envs")
+def _find_fallback_pythons() -> list[str]:
+    """Return paths to alternative Python interpreters found on the system."""
+    candidates = []
+    for minor in (13, 12, 11):
+        name = f"python3.{minor}"
+        found = shutil.which(name)
+        if found and found != sys.executable:
+            candidates.append(found)
+    return candidates
 
-    # venv base under the script directory
-    base = os.path.join(envs_dir, f"{package_name}_{version}")
+
+def _try_create_env(python_exe: str, base: str, package_name: str, version: str) -> str | None:
+    """Create a venv with ``python_exe`` and install ``package_name==version``.
+
+    Returns the venv python path on success, ``None`` on install failure.
+    """
     scripts_dir = "Scripts" if os.name == "nt" else "bin"
     python_executable = "python.exe" if os.name == "nt" else "python"
     py_bin = os.path.join(base, scripts_dir, python_executable)
-    # If environment already exists clean it
+
     if os.path.isfile(py_bin):
         shutil.rmtree(base)
 
-    print(f"Setting up venv for {package_name} {version}...", file=sys.stderr)
-    # Create venv
-    # NOTE: Running python in debug mode can cause issues with creating a virtual environment from that python instance
-    subprocess.run([sys.executable, "-m", "venv", base], check=True)
-    # Install the specific package version
+    subprocess.run([python_exe, "-m", "venv", base], check=True)
     subprocess.run([py_bin, "-m", "pip", "install", "--upgrade", "pip"], check=True)
-    subprocess.run([py_bin, "-m", "pip", "install", f"{package_name}=={version}"], check=True)
-    return py_bin, module_name
+
+    result = subprocess.run(
+        [py_bin, "-m", "pip", "install", f"{package_name}=={version}"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        return py_bin
+
+    shutil.rmtree(base, ignore_errors=True)
+    return None
+
+
+def ensure_env(version: str, export_dir) -> tuple[str, str] | tuple[None, None]:
+    """
+    Create a venv for a package version and return its python executable and module name.
+
+    If the package cannot be installed with the current Python, falls back to
+    alternative Python versions (3.13, 3.12, 3.11).  If no compatible Python is
+    found, issues a warning and returns ``(None, None)``.
+    """
+    package_name, module_name = _package_for_version(version)
+    envs_dir = os.path.join(export_dir, ".ladybug_envs")
+    base = os.path.join(envs_dir, f"{package_name}_{version}")
+
+    print(f"Setting up venv for {package_name} {version}...", file=sys.stderr)
+
+    py_bin = _try_create_env(sys.executable, base, package_name, version)
+    if py_bin is not None:
+        return py_bin, module_name
+
+    print(
+        f"Could not install {package_name}=={version} with {sys.executable} "
+        f"(Python {sys.version.split()[0]}), trying fallback interpreters...",
+        file=sys.stderr,
+    )
+    for fallback in _find_fallback_pythons():
+        fallback_base = base + f"_fb{os.path.basename(fallback)}"
+        print(f"  Trying {fallback}...", file=sys.stderr)
+        py_bin = _try_create_env(fallback, fallback_base, package_name, version)
+        if py_bin is not None:
+            return py_bin, module_name
+
+    warnings.warn(
+        f"Ladybug migration skipped: {package_name}=={version} could not be "
+        f"installed. No compatible Python interpreter (3.11-3.13) was found on "
+        f"this system. The database file may be in an older format that cannot "
+        f"be opened by the current version. Install Python 3.13 or delete the "
+        f"old database to resolve this.",
+        stacklevel=2,
+    )
+    return None, None
 
 
 def run_migration_step(python_exe: str, module_name: str, db_path: str, cypher: str):
@@ -171,8 +224,12 @@ def ladybug_migration(
         # Set up environments
         print(f"Setting up graph database {old_version} environment...", file=sys.stderr)
         old_py, old_module = ensure_env(old_version, export_dir)
+        if old_py is None:
+            return
         print(f"Setting up graph database {new_version} environment...", file=sys.stderr)
         new_py, new_module = ensure_env(new_version, export_dir)
+        if new_py is None:
+            return
 
         export_file = os.path.join(export_dir, "ladybug_export")
         print(f"Exporting old DB to {export_dir}", file=sys.stderr)
