@@ -159,25 +159,57 @@ def test_post_close_respawn_does_not_resurrect_handle(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_kuzu_adapter_rejects_partial_injection(tmp_path):
-    """Mirror of ``LanceDBAdapter`` validation: ``database``, ``connection``,
-    and ``session`` must all be provided (subprocess mode) or all left
-    ``None`` (local mode). Half-configured states would either leak a
-    worker on close or have no proxies to drive.
+def test_kuzu_adapter_rejects_partial_injection(tmp_path, monkeypatch):
+    """Validation rules for subprocess_mode:
+    - session is always required
+    - database and connection are required when shared_ladybug_lock is False
     """
+    import cognee.infrastructure.databases.graph.ladybug.adapter as adapter_mod
     from cognee.infrastructure.databases.graph.kuzu.adapter import KuzuAdapter
 
-    sentinel = object()
+    monkeypatch.setattr(adapter_mod.cache_config, "shared_ladybug_lock", False)
 
-    # Each of the seven invalid combinations.
-    invalid_combos = [
-        {"database": sentinel},
-        {"connection": sentinel},
-        {"session": sentinel},
-        {"database": sentinel, "connection": sentinel},
-        {"database": sentinel, "session": sentinel},
-        {"connection": sentinel, "session": sentinel},
-    ]
-    for kwargs in invalid_combos:
-        with pytest.raises(ValueError, match="all of"):
-            KuzuAdapter(db_path=str(tmp_path / "kuzu_partial"), **kwargs)
+    sentinel = object()
+    db_path = str(tmp_path / "kuzu_partial")
+
+    # Missing session always fails.
+    with pytest.raises(ValueError, match="requires a session"):
+        KuzuAdapter(db_path=db_path, subprocess_mode=True)
+
+    with pytest.raises(ValueError, match="requires a session"):
+        KuzuAdapter(db_path=db_path, subprocess_mode=True, database=sentinel, connection=sentinel)
+
+    # Session provided but missing database and/or connection fails
+    # when shared_ladybug_lock is disabled.
+    with pytest.raises(ValueError, match="requires database and connection"):
+        KuzuAdapter(db_path=db_path, subprocess_mode=True, session=sentinel)
+
+    with pytest.raises(ValueError, match="requires database and connection"):
+        KuzuAdapter(db_path=db_path, subprocess_mode=True, session=sentinel, database=sentinel)
+
+    with pytest.raises(ValueError, match="requires database and connection"):
+        KuzuAdapter(db_path=db_path, subprocess_mode=True, session=sentinel, connection=sentinel)
+
+
+def test_kuzu_adapter_subprocess_shared_lock_relaxes_db_conn(tmp_path, monkeypatch):
+    """When shared_ladybug_lock is enabled, only session is required for
+    subprocess_mode — database and connection are optional.
+    """
+    from unittest.mock import MagicMock
+
+    import cognee.infrastructure.databases.graph.ladybug.adapter as adapter_mod
+    from cognee.infrastructure.databases.graph.kuzu.adapter import KuzuAdapter
+
+    monkeypatch.setattr(adapter_mod.cache_config, "shared_ladybug_lock", True)
+    monkeypatch.setattr(adapter_mod, "get_cache_engine", MagicMock(), raising=False)
+
+    sentinel = object()
+    db_path = str(tmp_path / "kuzu_shared_lock")
+
+    # session alone is sufficient when shared_ladybug_lock is True.
+    adapter = KuzuAdapter(db_path=db_path, subprocess_mode=True, session=sentinel)
+    assert adapter._session is sentinel
+
+    # Missing session still fails.
+    with pytest.raises(ValueError, match="requires a session"):
+        KuzuAdapter(db_path=db_path, subprocess_mode=True)
