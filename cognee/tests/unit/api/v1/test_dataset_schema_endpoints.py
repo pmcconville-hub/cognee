@@ -135,3 +135,35 @@ def test_inferred_graph_schema_dto_requires_core_fields():
 
     with pytest.raises(ValidationError):
         InferredGraphSchemaDTO.model_validate({"type": "object", "properties": {}})
+
+
+def test_sample_text_short_input_unchanged():
+    """Short text should pass through unchanged."""
+    from cognee.api.v1.llm.routers.get_llm_router import _sample_text
+
+    short = "Hello world, this is a short text."
+    assert _sample_text(short) == short
+
+
+def test_sample_text_long_input_is_sampled():
+    """Long text should be sampled to roughly max_chars with begin/middle/end."""
+    from cognee.api.v1.llm.routers.get_llm_router import _sample_text
+
+    long_text = "A" * 5_000 + "B" * 5_000 + "C" * 5_000
+    result = _sample_text(long_text, max_chars=3_000)
+
+    assert len(result) <= 3_000 + 20  # small overhead from separators
+    assert "[...]" in result
+    # Beginning should start with A's, end should end with C's
+    assert result.startswith("A")
+    assert result.endswith("C")
+    # Middle section should contain B's
+    assert "B" in result
+
+
+def test_sample_text_exact_boundary():
+    """Text exactly at the limit should not be sampled."""
+    from cognee.api.v1.llm.routers.get_llm_router import _sample_text
+
+    text = "X" * 100
+    assert _sample_text(text, max_chars=100) == text

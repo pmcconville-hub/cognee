@@ -24,6 +24,11 @@ import tempfile
 
 logger = get_logger("api.llm")
 
+# Maximum characters of sample text sent to the LLM for schema inference.
+# Keeps the prompt well within typical context windows while providing
+# enough material for the model to identify entity types and relationships.
+_INFER_SCHEMA_MAX_CHARS = 12_000
+
 # NOTE: Needed because of: https://github.com/fastapi/fastapi/discussions/14975
 #       Once issue is resolved on Swagger side it can be removed.
 UploadFile = Annotated[UF, WithJsonSchema({"type": "string", "format": "binary"})]
@@ -33,6 +38,33 @@ _ALLOWED_LLM_PARAMS = {"temperature", "max_tokens", "top_p", "seed"}
 
 def _safe_params(params: dict) -> dict:
     return {k: v for k, v in params.items() if k in _ALLOWED_LLM_PARAMS}
+
+
+def _sample_text(text: str, max_chars: int = _INFER_SCHEMA_MAX_CHARS) -> str:
+    """Return a representative sample of *text* that fits within *max_chars*.
+
+    Strategy: take chunks from the beginning, middle, and end of the text so
+    the LLM sees a diverse cross-section of entity types and relationships
+    rather than only the opening paragraphs.
+    """
+    if len(text) <= max_chars:
+        return text
+
+    # Divide budget into three roughly-equal windows.
+    chunk = max_chars // 3
+    mid_start = (len(text) - chunk) // 2
+
+    beginning = text[:chunk]
+    middle = text[mid_start : mid_start + chunk]
+    end = text[-chunk:]
+
+    return (
+        beginning.rstrip()
+        + "\n\n[...]\n\n"
+        + middle.strip()
+        + "\n\n[...]\n\n"
+        + end.lstrip()
+    )
 
 
 @asynccontextmanager
@@ -134,7 +166,7 @@ def get_llm_router() -> APIRouter:
             return JSONResponse(status_code=400, content={"error": str(error)})
         except Exception as error:
             logger.error("LLM custom prompt generation request failed")
-            return JSONResponse(status_code=409, content={"error": str(error)})
+            return JSONResponse(status_code=500, content={"error": str(error)})
 
     @router.post("/infer-schema", response_model=InferSchemaResponseDTO)
     @log_usage(function_name="POST /v1/llm/infer-schema", log_type="api_endpoint")
@@ -190,10 +222,11 @@ def get_llm_router() -> APIRouter:
                 file_contents.append(text)
 
             file_contents_text = "\n\n".join(file_contents)
+            sample = _sample_text(file_contents_text)
 
             user_prompt = render_prompt(
                 "infer_schema_user.txt",
-                {"SAMPLE_TEXT": file_contents_text},
+                {"SAMPLE_TEXT": sample},
             )
 
             system_prompt = render_prompt(
@@ -228,6 +261,6 @@ def get_llm_router() -> APIRouter:
             )
         except Exception as error:
             logger.error("LLM schema inference failed: %s", error)
-            return JSONResponse(status_code=409, content={"error": str(error)})
+            return JSONResponse(status_code=500, content={"error": str(error)})
 
     return router
