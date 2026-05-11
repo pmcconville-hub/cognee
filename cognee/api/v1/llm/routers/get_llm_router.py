@@ -43,27 +43,35 @@ def _safe_params(params: dict) -> dict:
 def _sample_text(text: str, max_chars: int = _INFER_SCHEMA_MAX_CHARS) -> str:
     """Return a representative sample of *text* that fits within *max_chars*.
 
-    Strategy: take chunks from the beginning, middle, and end of the text so
-    the LLM sees a diverse cross-section of entity types and relationships
-    rather than only the opening paragraphs.
+    Strategy depends on how much larger the text is than the budget:
+    - ≤ max_chars: return as-is.
+    - ≤ 2× max_chars: take beginning and end (two sections).
+    - > 2× max_chars: take beginning, middle, and end (three sections).
+
+    This avoids near-duplicate content when the text is only slightly
+    over the limit.
     """
     if len(text) <= max_chars:
         return text
 
-    # Divide budget into three roughly-equal windows.
-    chunk = max_chars // 3
+    separator = "\n\n[...]\n\n"
+    sep_budget = len(separator)
+
+    if len(text) <= max_chars * 2:
+        # Two sections: beginning + end — no overlap possible.
+        half = (max_chars - sep_budget) // 2
+        return text[:half].rstrip() + separator + text[-half:].lstrip()
+
+    # Three sections: beginning, middle, end.
+    chunk = (max_chars - sep_budget * 2) // 3
     mid_start = (len(text) - chunk) // 2
 
-    beginning = text[:chunk]
-    middle = text[mid_start : mid_start + chunk]
-    end = text[-chunk:]
-
     return (
-        beginning.rstrip()
-        + "\n\n[...]\n\n"
-        + middle.strip()
-        + "\n\n[...]\n\n"
-        + end.lstrip()
+        text[:chunk].rstrip()
+        + separator
+        + text[mid_start : mid_start + chunk].strip()
+        + separator
+        + text[-chunk:].lstrip()
     )
 
 
