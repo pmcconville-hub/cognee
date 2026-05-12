@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from cognee.context_global_variables import multi_user_support_possible
+from cognee.context_global_variables import backend_access_control_enabled
 from cognee.infrastructure.databases.graph.get_graph_engine import get_graph_engine
 from cognee.infrastructure.databases.vector.get_vector_engine import get_vector_engine
 from cognee.modules.graph.legacy.has_edges_in_legacy_ledger import has_edges_in_legacy_ledger
@@ -33,7 +33,7 @@ async def delete_data_nodes_and_edges(dataset_id: UUID, data_id: UUID, user_id: 
     dataset = await get_authorized_dataset(user, dataset_id, "delete")
     dataset_id = dataset.id
 
-    if multi_user_support_possible():
+    if backend_access_control_enabled():
         affected_nodes = await get_data_related_nodes(dataset_id, data_id)
         affected_edges = await get_data_related_edges(dataset_id, data_id) if affected_nodes else []
     else:
@@ -58,7 +58,7 @@ async def delete_data_nodes_and_edges(dataset_id: UUID, data_id: UUID, user_id: 
     # slug sharing can occur.
     shared_slugs_to_detag: list = []
     orphaned_nodeset_labels: list = []
-    if not multi_user_support_possible():
+    if not backend_access_control_enabled():
         shared_slugs_to_detag = await get_shared_slugs_losing_dataset_anchor(dataset_id, data_id)
         if shared_slugs_to_detag:
             orphaned_nodeset_labels = await get_orphaned_nodeset_labels_for_dataset(
