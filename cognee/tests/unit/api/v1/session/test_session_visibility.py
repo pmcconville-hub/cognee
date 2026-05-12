@@ -33,27 +33,33 @@ async def parent_and_agent_sessions():
         await conn.run_sync(SessionRecord.metadata.create_all)
 
     async with engine.get_async_session() as session:
-        session.add(SessionRecord(
-            session_id="parent-session",
-            user_id=parent_id,
-            status="completed",
-            started_at=now,
-            last_activity_at=now,
-        ))
-        session.add(SessionRecord(
-            session_id="agent-session",
-            user_id=agent_id,
-            status="running",
-            started_at=now,
-            last_activity_at=now,
-        ))
-        session.add(SessionRecord(
-            session_id="other-session",
-            user_id=other_id,
-            status="running",
-            started_at=now,
-            last_activity_at=now,
-        ))
+        session.add(
+            SessionRecord(
+                session_id="parent-session",
+                user_id=parent_id,
+                status="completed",
+                started_at=now,
+                last_activity_at=now,
+            )
+        )
+        session.add(
+            SessionRecord(
+                session_id="agent-session",
+                user_id=agent_id,
+                status="running",
+                started_at=now,
+                last_activity_at=now,
+            )
+        )
+        session.add(
+            SessionRecord(
+                session_id="other-session",
+                user_id=other_id,
+                status="running",
+                started_at=now,
+                last_activity_at=now,
+            )
+        )
         await session.commit()
 
     yield {"parent_id": parent_id, "agent_id": agent_id, "other_id": other_id}
@@ -88,9 +94,7 @@ class TestListSessionRowsUserIds:
     @pytest.mark.asyncio
     async def test_user_ids_includes_agent_sessions(self, parent_and_agent_sessions):
         ids = parent_and_agent_sessions
-        page = await list_session_rows(
-            user_ids=[ids["parent_id"], ids["agent_id"]]
-        )
+        page = await list_session_rows(user_ids=[ids["parent_id"], ids["agent_id"]])
         session_ids = {r.record.session_id for r in page.sessions}
         assert "parent-session" in session_ids
         assert "agent-session" in session_ids
@@ -99,9 +103,7 @@ class TestListSessionRowsUserIds:
     @pytest.mark.asyncio
     async def test_user_ids_excludes_unrelated_users(self, parent_and_agent_sessions):
         ids = parent_and_agent_sessions
-        page = await list_session_rows(
-            user_ids=[ids["parent_id"], ids["agent_id"]]
-        )
+        page = await list_session_rows(user_ids=[ids["parent_id"], ids["agent_id"]])
         session_ids = {r.record.session_id for r in page.sessions}
         assert "other-session" not in session_ids
 
@@ -121,9 +123,7 @@ class TestGetSessionRowUserIds:
         assert row is None
 
     @pytest.mark.asyncio
-    async def test_parent_can_see_agent_session_with_user_ids(
-        self, parent_and_agent_sessions
-    ):
+    async def test_parent_can_see_agent_session_with_user_ids(self, parent_and_agent_sessions):
         ids = parent_and_agent_sessions
         row = await get_session_row(
             session_id="agent-session",
@@ -135,9 +135,7 @@ class TestGetSessionRowUserIds:
         assert row.user_id == ids["agent_id"]
 
     @pytest.mark.asyncio
-    async def test_user_ids_does_not_leak_unrelated_sessions(
-        self, parent_and_agent_sessions
-    ):
+    async def test_user_ids_does_not_leak_unrelated_sessions(self, parent_and_agent_sessions):
         ids = parent_and_agent_sessions
         row = await get_session_row(
             session_id="other-session",
