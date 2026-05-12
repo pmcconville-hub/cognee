@@ -4,12 +4,17 @@ import inspect
 import os
 from numbers import Number
 
-from functools import lru_cache
+from cognee.infrastructure.databases.utils.closing_lru_cache import closing_lru_cache
 from cognee.shared.lru_cache import DATABASE_MAX_LRU_CACHE_SIZE
 
+from .kuzu.adapter import DEFAULT_KUZU_BUFFER_POOL_SIZE, DEFAULT_KUZU_MAX_DB_SIZE
 from .config import get_graph_context_config
 from .graph_db_interface import GraphDBInterface
 from .supported_databases import supported_databases
+
+
+def _normalize_graph_database_provider(provider: str) -> str:
+    return provider.lower() if isinstance(provider, str) else provider
 
 
 def _get_create_graph_engine_optional_defaults() -> dict:
@@ -42,7 +47,7 @@ def _normalize_optional_create_graph_engine_params(params: dict) -> dict:
 
     if not normalized.get("graph_dataset_database_handler"):
         normalized["graph_dataset_database_handler"] = os.getenv(
-            "GRAPH_DATASET_DATABASE_HANDLER", "kuzu"
+            "GRAPH_DATASET_DATABASE_HANDLER", "ladybug"
         )
 
     return normalized
@@ -76,6 +81,10 @@ def create_graph_engine(
     graph_database_port="",
     graph_database_key="",
     graph_dataset_database_handler="",
+    graph_database_subprocess_enabled=False,
+    kuzu_num_threads=0,
+    kuzu_buffer_pool_size=DEFAULT_KUZU_BUFFER_POOL_SIZE,
+    kuzu_max_db_size=DEFAULT_KUZU_MAX_DB_SIZE,
 ):
     """
     Wrapper function to call create graph engine with caching.
@@ -84,6 +93,7 @@ def create_graph_engine(
 
     normalized_optional_params = _normalize_optional_create_graph_engine_params(locals())
     graph_database_url = normalized_optional_params["graph_database_url"]
+    graph_database_provider = _normalize_graph_database_provider(graph_database_provider)
     graph_database_name = normalized_optional_params["graph_database_name"]
     graph_database_username = normalized_optional_params["graph_database_username"]
     graph_database_password = normalized_optional_params["graph_database_password"]
@@ -91,6 +101,15 @@ def create_graph_engine(
     graph_database_port = normalized_optional_params["graph_database_port"]
     graph_database_key = normalized_optional_params["graph_database_key"]
     graph_dataset_database_handler = normalized_optional_params["graph_dataset_database_handler"]
+    # The Kuzu/subprocess params also went through ``_normalize_optional_*``;
+    # reassign so callers passing ``None`` see the function-default applied
+    # (otherwise ``None`` would flow into the cache key and the factory).
+    graph_database_subprocess_enabled = normalized_optional_params[
+        "graph_database_subprocess_enabled"
+    ]
+    kuzu_num_threads = normalized_optional_params["kuzu_num_threads"]
+    kuzu_buffer_pool_size = normalized_optional_params["kuzu_buffer_pool_size"]
+    kuzu_max_db_size = normalized_optional_params["kuzu_max_db_size"]
 
     # Check USE_UNIFIED_PROVIDER outside the cache so it's always re-read
     unified_provider = os.environ.get("USE_UNIFIED_PROVIDER", "")
@@ -113,10 +132,44 @@ def create_graph_engine(
         graph_database_port,
         graph_database_key,
         graph_dataset_database_handler,
+        graph_database_subprocess_enabled,
+        kuzu_num_threads,
+        kuzu_buffer_pool_size,
+        kuzu_max_db_size,
     )
 
 
-@lru_cache(maxsize=DATABASE_MAX_LRU_CACHE_SIZE)
+def evict_graph_engine(**kwargs) -> bool:
+    """Evict a cached graph engine entry created via ``create_graph_engine``.
+
+    Mirrors ``create_graph_engine``'s normalization so the cache key
+    matches. Used by per-dataset deletion paths to drop the leased
+    adapter (and trigger its ``close()``) without disturbing the rest
+    of the cache.
+
+    Returns True if the entry existed.
+    """
+    normalized = _normalize_optional_create_graph_engine_params(kwargs)
+    provider = _normalize_graph_database_provider(kwargs.get("graph_database_provider"))
+    return _create_graph_engine.cache_evict(
+        provider,
+        kwargs.get("graph_file_path"),
+        normalized["graph_database_url"],
+        normalized["graph_database_name"],
+        normalized["graph_database_username"],
+        normalized["graph_database_password"],
+        normalized["graph_database_allow_anonymous"],
+        normalized["graph_database_port"],
+        normalized["graph_database_key"],
+        normalized["graph_dataset_database_handler"],
+        normalized["graph_database_subprocess_enabled"],
+        normalized["kuzu_num_threads"],
+        normalized["kuzu_buffer_pool_size"],
+        normalized["kuzu_max_db_size"],
+    )
+
+
+@closing_lru_cache(maxsize=DATABASE_MAX_LRU_CACHE_SIZE)
 def _create_graph_engine(
     graph_database_provider,
     graph_file_path,
@@ -128,6 +181,10 @@ def _create_graph_engine(
     graph_database_port="",
     graph_database_key="",
     graph_dataset_database_handler="",
+    graph_database_subprocess_enabled=False,
+    kuzu_num_threads=0,
+    kuzu_buffer_pool_size=DEFAULT_KUZU_BUFFER_POOL_SIZE,
+    kuzu_max_db_size=DEFAULT_KUZU_MAX_DB_SIZE,
 ):
     """
     Create a graph engine based on the specified provider type.
@@ -139,7 +196,7 @@ def _create_graph_engine(
     Parameters:
     -----------
 
-        - graph_database_provider: The type of graph database provider to use (e.g., neo4j, falkor, kuzu).
+        - graph_database_provider: The type of graph database provider to use (e.g., neo4j, falkor, ladybug).
         - graph_database_url: The URL for the graph database instance. Required for neo4j and falkordb providers.
         - graph_database_username: The username for authentication with the graph database.
           Required for neo4j provider.
@@ -147,7 +204,7 @@ def _create_graph_engine(
           Required for neo4j provider.
         - graph_database_port: The port number for the graph database connection. Required
           for the falkordb provider
-        - graph_file_path: The filesystem path to the graph file. Required for the kuzu
+        - graph_file_path: The filesystem path to the graph file. Required for the ladybug
           provider.
 
     Returns:
@@ -191,21 +248,34 @@ def _create_graph_engine(
 
         return PostgresAdapter(connection_string=graph_database_url)
 
-    elif graph_database_provider == "kuzu":
+    elif graph_database_provider in ("ladybug", "kuzu"):
         if not graph_file_path:
-            raise EnvironmentError("Missing required Kuzu database path.")
+            raise EnvironmentError("Missing required Ladybug database path.")
 
-        from .kuzu.adapter import KuzuAdapter
+        from .ladybug.adapter import LadybugAdapter
 
-        return KuzuAdapter(db_path=graph_file_path)
+        if graph_database_subprocess_enabled:
+            return LadybugAdapter.create_subprocess(
+                db_path=graph_file_path,
+                kuzu_num_threads=kuzu_num_threads,
+                kuzu_buffer_pool_size=kuzu_buffer_pool_size,
+                kuzu_max_db_size=kuzu_max_db_size,
+            )
 
-    elif graph_database_provider == "kuzu-remote":
+        return LadybugAdapter(
+            db_path=graph_file_path,
+            kuzu_num_threads=kuzu_num_threads,
+            kuzu_buffer_pool_size=kuzu_buffer_pool_size,
+            kuzu_max_db_size=kuzu_max_db_size,
+        )
+
+    elif graph_database_provider in ("ladybug-remote", "kuzu-remote"):
         if not graph_database_url:
-            raise EnvironmentError("Missing required Kuzu remote URL.")
+            raise EnvironmentError("Missing required Ladybug remote URL.")
 
-        from .kuzu.remote_kuzu_adapter import RemoteKuzuAdapter
+        from .ladybug.remote_ladybug_adapter import RemoteLadybugAdapter
 
-        return RemoteKuzuAdapter(
+        return RemoteLadybugAdapter(
             api_url=graph_database_url,
             username=graph_database_username,
             password=graph_database_password,
@@ -269,6 +339,8 @@ def _create_graph_engine(
 
     all_providers = list(supported_databases.keys()) + [
         "neo4j",
+        "ladybug",
+        "ladybug-remote",
         "kuzu",
         "kuzu-remote",
         "postgres",
