@@ -1,13 +1,16 @@
 import asyncio
 import copy
+import inspect
+import threading
 import types
+from collections import OrderedDict
 from os import path
 from uuid import UUID
 from enum import Enum
 import lancedb
 from pydantic import BaseModel
 from lancedb.pydantic import LanceModel, Vector
-from typing import Generic, List, Optional, TypeVar, Union, get_args, get_origin, get_type_hints
+from typing import List, Optional, Union, get_args, get_origin, get_type_hints
 
 from cognee.infrastructure.databases.exceptions import MissingQueryParameterError
 from cognee.infrastructure.engine import DataPoint
@@ -71,37 +74,264 @@ class LanceDBAdapter(VectorDBInterface):
     """Vector-database adapter backed by LanceDB; implements the VectorDBInterface contract."""
 
     name = "LanceDB"
-    url: str
-    api_key: str
-    connection: lancedb.AsyncConnection = None
+    # ``Optional`` because ``__init__`` accepts ``None`` for both — local
+    # mode without an API key passes ``api_key=None``, and subprocess-mode
+    # adapters constructed from cached state may also receive ``url=None``
+    # (the ``RemoteLanceDBConnection`` carries the real URL).
+    url: Optional[str]
+    api_key: Optional[str]
+    connection = None
+
+    # Class-level memoization caches. They are shared across all adapter
+    # instances because ``copy_model()`` and the LanceModel subclassing only
+    # depend on the source DataPoint type + vector size — never on the
+    # adapter instance itself.
+    #
+    # Pydantic attaches large per-class state (FieldInfo, SchemaSerializer,
+    # SchemaValidator, ModelMetaclass, LazyClassAttribute) and caches it
+    # globally by class identity. Without memoization, every call to
+    # ``create_data_points`` mints a brand-new class for every data point,
+    # and those classes are never collected — the tracemalloc profile on a
+    # 2-cycle run showed +5550 FieldInfo and +879 ModelMetaclass per cycle.
+    #
+    # Bounded LRUs (cap 256). An unbounded dict would itself become a
+    # memory-growth source if callers create many distinct DataPoint /
+    # vector-size pairs over a long-running process — defeating the very
+    # leak the cache is here to fix.
+    _PAYLOAD_SCHEMA_CACHE_SIZE = 256
+    _LANCE_DATAPOINT_CACHE_SIZE = 256
+    _payload_schema_cache: "OrderedDict" = OrderedDict()
+    _lance_datapoint_class_cache: "OrderedDict" = OrderedDict()
+    _lance_cache_lock = threading.Lock()
+
+    @classmethod
+    def create_subprocess(
+        cls,
+        url: Optional[str],
+        api_key: Optional[str],
+        embedding_engine: "EmbeddingEngine",
+    ) -> "LanceDBAdapter":
+        """Create a LanceDBAdapter running in subprocess-proxy mode."""
+        from .subprocess.proxy import (
+            LanceDBSubprocessSession,
+            RemoteLanceDBConnection,
+        )
+
+        session = LanceDBSubprocessSession.start()
+        try:
+            remote_conn = RemoteLanceDBConnection(session, url=url, api_key=api_key)
+        except Exception:
+            session.shutdown(timeout=2.0)
+            raise
+
+        return cls(
+            url=url,
+            api_key=api_key,
+            embedding_engine=embedding_engine,
+            connection=remote_conn,
+            session=session,
+        )
 
     def __init__(
         self,
         url: Optional[str],
         api_key: Optional[str],
         embedding_engine: EmbeddingEngine,
+        *,
+        connection: Optional[object] = None,
+        session: Optional[object] = None,
     ):
-        """Store connection params; connection is lazily established in get_connection()."""
+        """
+        In subprocess-proxy mode, ``connection`` is a ``RemoteLanceDBConnection``
+        and ``session`` is a ``LanceDBSubprocessSession``. In local mode both
+        are ``None`` and the adapter lazily creates a ``lancedb.AsyncConnection``
+        on first use.
+
+        Mixing the two — e.g. passing ``connection`` without ``session`` —
+        creates an adapter no one owns: ``get_connection()`` would return a
+        remote connection whose worker the adapter cannot shut down, leaving
+        an orphaned subprocess on close. Reject up front.
+        """
+        if (connection is None) != (session is None):
+            raise ValueError(
+                "LanceDBAdapter requires both `connection` and `session` "
+                "in subprocess mode, or neither in local mode."
+            )
+        # ``url`` is typed ``Optional[str]`` so callers can pass ``None``
+        # in subprocess-proxy mode (the ``RemoteLanceDBConnection``
+        # carries the real URL). In local mode the URL drives every
+        # connection / file operation, so reject ``None`` up front
+        # instead of crashing on the first ``connect_async`` /
+        # ``prune`` call with a confusing ``AttributeError``.
+        if connection is None and url is None:
+            raise ValueError("LanceDBAdapter local mode requires a non-None `url`.")
         self.url = url
         self.api_key = api_key
         self.embedding_engine = embedding_engine
         self.VECTOR_DB_LOCK = asyncio.Lock()
+        # Guards lifecycle state — the ``connection``, ``_session`` and
+        # ``_permanently_closed`` triple must be observed/mutated atomically
+        # so a concurrent ``close()`` can't be silently overwritten by an
+        # in-flight ``get_connection()`` resuming after its ``await``.
+        # ``threading.Lock`` (not ``asyncio.Lock``) for cross-loop safety:
+        # ``close()`` can be invoked from a foreign event loop via
+        # ``closing_lru_cache._close_value`` running ``asyncio.run``, and
+        # awaiting an asyncio.Lock there raises "got Future attached to a
+        # different loop". The lock is held for microseconds at a time and
+        # never wraps an ``await``, so it can't deadlock the event loop.
+        self._lifecycle_lock = threading.Lock()
+        self.connection = connection
+        self._session = session
+        # True iff this adapter was constructed in subprocess-proxy mode.
+        # Latched at construction and NOT cleared by close()/clean(); once a
+        # session is provided the adapter is forever bound to it. Combined
+        # with ``_permanently_closed`` this gives a clean 3-state model:
+        #   (False, False) — local mode, usable
+        #   (True,  False) — subprocess mode, usable
+        #   (*,     True)  — closed, not reusable in either mode
+        self._subprocess_mode = session is not None
+        self._permanently_closed = False
 
     async def get_connection(self):
         """
-        Establishes and returns a connection to the LanceDB.
+        Return the connection used by this adapter.
 
-        If a connection already exists, it will return the existing connection.
+        - Local mode: lazily constructs a ``lancedb.AsyncConnection``.
+        - Subprocess mode: returns the injected ``RemoteLanceDBConnection``
+          (ensuring its underlying subprocess ``lancedb`` connection is opened).
 
-        Returns:
-        --------
+        A subprocess-mode adapter that has been closed is an error state —
+        we refuse to silently fall through to a local lancedb connection.
 
-            - lancedb.AsyncConnection: An active connection to the LanceDB.
+        Race-safe under concurrent ``close()`` via ``_lifecycle_lock``: any
+        connection created during an ``await`` is committed (or discarded)
+        only after a re-check of the closed flag, so a closed adapter can
+        never silently start handing out fresh connections again.
         """
-        if self.connection is None:
-            self.connection = await lancedb.connect_async(self.url, api_key=self.api_key)
+        # Atomic state snapshot — no awaits inside the lock.
+        with self._lifecycle_lock:
+            if self._permanently_closed:
+                raise RuntimeError(
+                    "LanceDBAdapter is closed; a new adapter must be created "
+                    "(subprocess-mode adapters cannot be re-initialized)."
+                )
+            existing = self.connection
+            if existing is None and self._subprocess_mode:
+                raise RuntimeError(
+                    "LanceDBAdapter subprocess session is gone; adapter cannot "
+                    "be re-initialized in local mode."
+                )
 
-        return self.connection
+        if existing is not None:
+            # Remote connection lazily opens its own underlying lancedb handle.
+            # If the first connect fails (bad URL, auth, network) the session
+            # stays alive and never gets used — tear it down immediately so a
+            # retry doesn't leak an orphan worker process for each failed
+            # attempt. Mutate state under the lock so a concurrent ``close()``
+            # observes a coherent (closed, no-session) view.
+            ensure = getattr(existing, "_ensure_connected", None)
+            if ensure is not None:
+                try:
+                    await ensure()
+                except Exception:
+                    with self._lifecycle_lock:
+                        session = self._session
+                        self._session = None
+                        self.connection = None
+                        self._permanently_closed = True
+                    if session is not None:
+                        # ``session.shutdown()`` is sync and can block for
+                        # seconds (join → terminate → kill chain plus a
+                        # bounded ``_rpc_lock`` acquire). Offload to a
+                        # worker thread so we don't freeze the event loop
+                        # during cleanup.
+                        try:
+                            await asyncio.to_thread(session.shutdown)
+                        except Exception as teardown_err:
+                            logger.warning(
+                                "Error shutting down LanceDB subprocess after connect failure: %s",
+                                teardown_err,
+                            )
+                    raise
+            # Re-check the closed flag after the await — a concurrent
+            # ``close()`` could have run while we were inside
+            # ``_ensure_connected``, in which case we must not return
+            # the (now-defunct) proxy.
+            with self._lifecycle_lock:
+                if self._permanently_closed:
+                    raise RuntimeError(
+                        "LanceDBAdapter is closed; a new adapter must be created "
+                        "(subprocess-mode adapters cannot be re-initialized)."
+                    )
+            return existing
+
+        # Local mode, lazy: create the connection outside the lock (the
+        # await would otherwise block any concurrent observer), then
+        # commit under the lock with a re-check. A concurrent ``close()``
+        # that ran during our await must NOT be silently overwritten —
+        # we discard the new connection and raise instead.
+        new_conn = await lancedb.connect_async(self.url, api_key=self.api_key)
+        stale = None
+        # Capture the *winning* connection under the lock. Reading
+        # ``self.connection`` after the lock release would race a
+        # concurrent ``close()`` that nulls the field, and we'd return
+        # ``None`` (or a connection that's about to be closed).
+        winner = None
+        with self._lifecycle_lock:
+            if self._permanently_closed:
+                stale = new_conn
+                # winner stays None — we'll raise after closing the throwaway.
+            elif self.connection is not None:
+                # Lost the race — another caller already committed. Discard ours.
+                stale = new_conn
+                winner = self.connection
+            else:
+                self.connection = new_conn
+                return new_conn
+
+        # Discard the throwaway outside the lock — its close is async.
+        try:
+            await stale.close()
+        except Exception:
+            pass
+        if winner is None:
+            raise RuntimeError(
+                "LanceDBAdapter is closed; a new adapter must be created "
+                "(subprocess-mode adapters cannot be re-initialized)."
+            )
+        return winner
+
+    # ------------------------------------------------------------------
+    # Subprocess-mode conversion helpers. In local mode these are no-ops.
+    # ------------------------------------------------------------------
+    def _schema_for_create_table(self, lance_model_cls):
+        """Return the schema value to pass to ``connection.create_table``.
+
+        Local mode: a ``LanceModel`` class (lancedb accepts it directly).
+        Subprocess mode: a ``pa.Schema`` derived from the LanceModel so the
+        worker doesn't need to see pydantic.
+        """
+        if not self._subprocess_mode:
+            return lance_model_cls
+        return lance_model_cls.to_arrow_schema()
+
+    def _records_for_write(self, records):
+        """Convert LanceModel instances to a typed ``pa.Table`` in
+        subprocess mode so the worker never needs to see pydantic. The
+        Table carries both the data and the schema (derived from the
+        LanceModel class via ``to_arrow_schema``) so LanceDB gets the
+        exact types it expects.
+        """
+        if not records:
+            return records
+        if not self._subprocess_mode:
+            return records
+
+        import pyarrow as pa
+
+        dicts = [r.model_dump() for r in records]
+        schema = type(records[0]).to_arrow_schema()
+        return pa.Table.from_pylist(dicts, schema=schema)
 
     async def embed_data(self, data: list[str]) -> list[list[float]]:
         """
@@ -146,21 +376,7 @@ class LanceDBAdapter(VectorDBInterface):
         vector_size = self.embedding_engine.get_vector_size()
 
         payload_schema = self.get_data_point_schema(payload_schema)
-        data_point_types = get_type_hints(payload_schema)
-
-        class LanceDataPoint(LanceModel):
-            """
-            Represents a data point in the Lance model with an ID, vector, and associated payload.
-
-            The class inherits from LanceModel and defines the following public attributes:
-            - id: A unique identifier for the data point.
-            - vector: A vector representing the data point in a specified dimensional space.
-            - payload: Additional data or metadata associated with the data point.
-            """
-
-            id: data_point_types["id"]
-            vector: Vector(vector_size)
-            payload: payload_schema
+        LanceDataPoint = self._make_lance_datapoint_cls(payload_schema, vector_size)
 
         if not await self.has_collection(collection_name):
             async with self.VECTOR_DB_LOCK:
@@ -168,7 +384,7 @@ class LanceDBAdapter(VectorDBInterface):
                     connection = await self.get_connection()
                     return await connection.create_table(
                         name=collection_name,
-                        schema=LanceDataPoint,
+                        schema=self._schema_for_create_table(LanceDataPoint),
                         exist_ok=True,
                     )
 
@@ -198,22 +414,14 @@ class LanceDBAdapter(VectorDBInterface):
             [DataPoint.get_embeddable_data(data_point) for data_point in data_points]
         )
 
-        IdType = TypeVar("IdType")
-        PayloadSchema = TypeVar("PayloadSchema")
         vector_size = self.embedding_engine.get_vector_size()
 
-        class LanceDataPoint(LanceModel, Generic[IdType, PayloadSchema]):
-            """
-            Represents a data point in the Lance model with an ID, vector, and payload.
-
-            This class encapsulates a data point consisting of an identifier, a vector representing
-            the data, and an associated payload, allowing for operations and manipulations specific
-            to the Lance data structure.
-            """
-
-            id: IdType
-            vector: Vector(vector_size)
-            payload: PayloadSchema
+        # One LanceDataPoint class per (payload schema, vector size), cached
+        # globally. Building a new class per call — let alone per record —
+        # leaks pydantic SchemaValidator/Serializer state that never gets gc'd.
+        def _lance_cls_for(data_point):
+            schema = self.get_data_point_schema(type(data_point))
+            return self._make_lance_datapoint_cls(schema, vector_size), schema
 
         # The prefetch of existing `belongs_to_set` values and the subsequent
         # merge_insert must run inside the same lock section. If a second
@@ -254,62 +462,57 @@ class LanceDBAdapter(VectorDBInterface):
                             e,
                         )
 
-                def create_lance_data_point(
-                    data_point: DataPoint, vector: list[float]
-                ) -> LanceDataPoint:
-                    """Build a typed LanceDataPoint from a DataPoint, merging any prior belongs_to_set tags."""
-                    payload_model = self.get_data_point_schema(type(data_point))
-                    properties = payload_model.model_validate(
-                        serialize_data(data_point.model_dump())
-                    ).model_dump()
+            def create_lance_data_point(data_point: DataPoint, vector: list[float]):
+                lance_cls, payload_model = _lance_cls_for(data_point)
+                properties = payload_model.model_validate(
+                    serialize_data(data_point.model_dump())
+                ).model_dump()
 
-                    prior = existing_belongs_to_set.get(str(data_point.id))
-                    if prior:
-                        incoming = properties.get("belongs_to_set") or []
-                        properties["belongs_to_set"] = list(
-                            dict.fromkeys(list(prior) + list(incoming))
-                        )
+                prior = existing_belongs_to_set.get(str(data_point.id))
+                if prior:
+                    incoming = properties.get("belongs_to_set") or []
+                    properties["belongs_to_set"] = list(dict.fromkeys(list(prior) + list(incoming)))
 
-                    return LanceDataPoint[str, self.get_data_point_schema(type(data_point))](
-                        id=str(data_point.id),
-                        vector=vector,
-                        payload=properties,
-                    )
-
-                lance_data_points = [
-                    create_lance_data_point(data_point, data_vectors[data_point_index])
-                    for (data_point_index, data_point) in enumerate(data_points)
-                ]
-
-                # Dedup by id within the batch — on duplicates, union
-                # `belongs_to_set` instead of keeping only the last
-                # occurrence. A plain dict-collapse would drop tags that
-                # only appeared on earlier siblings (mirrors the
-                # batch-merge logic in PGVectorAdapter.create_data_points
-                # and Neo4jAdapter.add_nodes).
-                deduped_lance_points: dict = {}
-                for dp in lance_data_points:
-                    existing = deduped_lance_points.get(dp.id)
-                    if existing is None:
-                        deduped_lance_points[dp.id] = dp
-                        continue
-                    existing_payload = existing.payload.model_dump()
-                    incoming_payload = dp.payload.model_dump()
-                    existing_tags = existing_payload.get("belongs_to_set") or []
-                    incoming_tags = incoming_payload.get("belongs_to_set") or []
-                    if existing_tags or incoming_tags:
-                        merged_tags = list(dict.fromkeys(list(existing_tags) + list(incoming_tags)))
-                        incoming_payload["belongs_to_set"] = merged_tags
-                        dp.payload = type(dp.payload).model_validate(incoming_payload)
-                    deduped_lance_points[dp.id] = dp
-                lance_data_points = list(deduped_lance_points.values())
-
-                await (
-                    collection.merge_insert("id")
-                    .when_matched_update_all()
-                    .when_not_matched_insert_all()
-                    .execute(lance_data_points)
+                return lance_cls(
+                    id=str(data_point.id),
+                    vector=vector,
+                    payload=properties,
                 )
+
+            lance_data_points = [
+                create_lance_data_point(data_point, data_vectors[data_point_index])
+                for (data_point_index, data_point) in enumerate(data_points)
+            ]
+
+            # Dedup by id within the batch — on duplicates, union
+            # `belongs_to_set` instead of keeping only the last
+            # occurrence. A plain dict-collapse would drop tags that
+            # only appeared on earlier siblings (mirrors the
+            # batch-merge logic in PGVectorAdapter.create_data_points
+            # and Neo4jAdapter.add_nodes).
+            deduped_lance_points: dict = {}
+            for dp in lance_data_points:
+                existing = deduped_lance_points.get(dp.id)
+                if existing is None:
+                    deduped_lance_points[dp.id] = dp
+                    continue
+                existing_payload = existing.payload.model_dump()
+                incoming_payload = dp.payload.model_dump()
+                existing_tags = existing_payload.get("belongs_to_set") or []
+                incoming_tags = incoming_payload.get("belongs_to_set") or []
+                if existing_tags or incoming_tags:
+                    merged_tags = list(dict.fromkeys(list(existing_tags) + list(incoming_tags)))
+                    incoming_payload["belongs_to_set"] = merged_tags
+                    dp.payload = type(dp.payload).model_validate(incoming_payload)
+                deduped_lance_points[dp.id] = dp
+            lance_data_points = list(deduped_lance_points.values())
+
+            await (
+                collection.merge_insert("id")
+                .when_matched_update_all()
+                .when_not_matched_insert_all()
+                .execute(self._records_for_write(lance_data_points))
+            )
         except (ValueError, OSError, RuntimeError) as e:
             # Two LanceDB schema-drift failure modes are recoverable by rebuilding
             # the table via Pydantic validation (which fills defaults from the
@@ -328,9 +531,6 @@ class LanceDBAdapter(VectorDBInterface):
                 collection_name,
                 e,
             )
-            # `_migrate_collection_schema` acquires VECTOR_DB_LOCK itself;
-            # we've already released it by dropping out of the `async with`
-            # via the raised exception, so no deadlock risk here.
             await self._migrate_collection_schema(
                 collection_name, collection, payload_schema, lance_data_points
             )
@@ -347,16 +547,12 @@ class LanceDBAdapter(VectorDBInterface):
 
         vector_size = self.embedding_engine.get_vector_size()
         schema_model = self.get_data_point_schema(payload_schema)
-        data_point_types = get_type_hints(schema_model)
         valid_payload_fields = set(schema_model.model_fields.keys())
         defaults = self._get_payload_defaults(payload_schema)
 
-        class MigrationLanceDataPoint(LanceModel):
-            """LanceModel used to write rows with the updated payload schema during migration."""
-
-            id: data_point_types["id"]
-            vector: Vector(vector_size)
-            payload: schema_model
+        # Reuse the cached LanceDataPoint class rather than mint a new
+        # ``MigrationLanceDataPoint`` class per migration call.
+        MigrationLanceDataPoint = self._make_lance_datapoint_cls(schema_model, vector_size)
 
         new_ids = {dp.id for dp in new_lance_data_points}
         typed_old_rows = []
@@ -423,19 +619,19 @@ class LanceDBAdapter(VectorDBInterface):
             await connection.drop_table(collection_name)
             await connection.create_table(
                 name=collection_name,
-                schema=MigrationLanceDataPoint,
+                schema=self._schema_for_create_table(MigrationLanceDataPoint),
             )
             collection = await connection.open_table(collection_name)
 
             if typed_old_rows:
-                await collection.add(typed_old_rows)
+                await collection.add(self._records_for_write(typed_old_rows))
 
             if new_lance_data_points:
                 await (
                     collection.merge_insert("id")
                     .when_matched_update_all()
                     .when_not_matched_insert_all()
-                    .execute(new_lance_data_points)
+                    .execute(self._records_for_write(new_lance_data_points))
                 )
 
         logger.info(
@@ -497,8 +693,6 @@ class LanceDBAdapter(VectorDBInterface):
         data_point_types = get_type_hints(schema_model)
 
         class SchemaProbeDataPoint(LanceModel):
-            """Throwaway LanceModel used only to extract the target Arrow schema."""
-
             id: data_point_types["id"]
             vector: Vector(vector_size)
             payload: schema_model
@@ -726,7 +920,6 @@ class LanceDBAdapter(VectorDBInterface):
         node_name: Optional[List[str]] = None,
         node_name_filter_operator: str = "OR",
     ):
-        """Run a cosine-distance search, optionally filtered by NodeSet tag."""
         with new_span("cognee.db.vector.search") as otel_span:
             otel_span.set_attribute(COGNEE_DB_SYSTEM, "lancedb")
             otel_span.set_attribute(COGNEE_VECTOR_COLLECTION, collection_name)
@@ -814,7 +1007,6 @@ class LanceDBAdapter(VectorDBInterface):
         include_payload: bool = False,
         node_name: Optional[List[str]] = None,
     ):
-        """Run `search` concurrently for each query text and return a list of result lists."""
         query_vectors = await self.embedding_engine.embed_text(query_texts)
 
         return await asyncio.gather(
@@ -832,7 +1024,6 @@ class LanceDBAdapter(VectorDBInterface):
         )
 
     async def delete_data_points(self, collection_name: str, data_point_ids: list[UUID]):
-        """Delete rows from `collection_name` whose id is in `data_point_ids`."""
         # Skip deletion if collection doesn't exist
         if not await self.has_collection(collection_name):
             return
@@ -997,7 +1188,6 @@ class LanceDBAdapter(VectorDBInterface):
         return None
 
     async def create_vector_index(self, index_name: str, index_property_name: str):
-        """Create the underlying index collection for the given name/property pair."""
         await self.create_collection(
             f"{index_name}_{index_property_name}", payload_schema=IndexSchema
         )
@@ -1005,7 +1195,6 @@ class LanceDBAdapter(VectorDBInterface):
     async def index_data_points(
         self, index_name: str, index_property_name: str, data_points: list[DataPoint]
     ):
-        """Write index rows derived from `data_points` into the `{index}_{property}` table."""
         await self.create_data_points(
             f"{index_name}_{index_property_name}",
             [
@@ -1019,7 +1208,6 @@ class LanceDBAdapter(VectorDBInterface):
         )
 
     async def prune(self):
-        """Drop every LanceDB table and remove the on-disk database directory."""
         connection = await self.get_connection()
         collection_names = await connection.table_names()
 
@@ -1034,7 +1222,58 @@ class LanceDBAdapter(VectorDBInterface):
             await get_file_storage(db_dir_path).remove_all(db_file_name)
 
     def get_data_point_schema(self, model_type: BaseModel):
-        """Build the reduced LanceDB payload schema for a DataPoint model."""
+        """Return the storable payload schema for ``model_type``. Memoized on
+        the class — repeated calls with the same DataPoint subclass reuse the
+        same synthesized Pydantic class instead of re-minting one every time
+        (which pydantic's SchemaValidator / SchemaSerializer cache would
+        otherwise accumulate indefinitely).
+        """
+        with self._lance_cache_lock:
+            cached = self._payload_schema_cache.get(model_type)
+            if cached is not None:
+                self._payload_schema_cache.move_to_end(model_type)
+                return cached
+        cached = self._build_data_point_schema(model_type)
+        with self._lance_cache_lock:
+            existing = self._payload_schema_cache.get(model_type)
+            if existing is not None:
+                self._payload_schema_cache.move_to_end(model_type)
+                return existing
+            self._payload_schema_cache[model_type] = cached
+            if len(self._payload_schema_cache) > self._PAYLOAD_SCHEMA_CACHE_SIZE:
+                self._payload_schema_cache.popitem(last=False)
+        return cached
+
+    @classmethod
+    def _make_lance_datapoint_cls(cls, payload_schema, vector_size: int):
+        """Return a concrete (non-generic) ``LanceDataPoint`` subclass for the
+        given (payload_schema, vector_size) pair. Memoized globally so cognee
+        workloads that keep hitting the same DataPoint types don't mint a new
+        LanceModel subclass on every insert.
+        """
+        key = (payload_schema, int(vector_size))
+        with cls._lance_cache_lock:
+            cached = cls._lance_datapoint_class_cache.get(key)
+            if cached is not None:
+                cls._lance_datapoint_class_cache.move_to_end(key)
+                return cached
+
+        class LanceDataPoint(LanceModel):
+            id: str
+            vector: Vector(vector_size)
+            payload: payload_schema
+
+        with cls._lance_cache_lock:
+            existing = cls._lance_datapoint_class_cache.get(key)
+            if existing is not None:
+                cls._lance_datapoint_class_cache.move_to_end(key)
+                return existing
+            cls._lance_datapoint_class_cache[key] = LanceDataPoint
+            if len(cls._lance_datapoint_class_cache) > cls._LANCE_DATAPOINT_CACHE_SIZE:
+                cls._lance_datapoint_class_cache.popitem(last=False)
+        return LanceDataPoint
+
+    def _build_data_point_schema(self, model_type: BaseModel):
         related_models_fields = []
 
         for field_name, field_config in model_type.model_fields.items():
@@ -1071,3 +1310,43 @@ class LanceDBAdapter(VectorDBInterface):
             },
             exclude_fields=["metadata"] + related_models_fields,
         )
+
+    async def close(self):
+        """Release the underlying connection and, in subprocess mode, tear down
+        the worker process. Once closed the adapter is not reusable. Idempotent.
+
+        Snapshot lifecycle state atomically under ``_lifecycle_lock``, then
+        do the slow teardown (``connection.close()`` is async, ``session.shutdown()``
+        can take seconds) outside the lock. The flag is flipped first so a
+        concurrent ``get_connection`` that reads the snapshot sees the
+        closed state immediately — no new connections after this point.
+        """
+        with self._lifecycle_lock:
+            if self._permanently_closed:
+                return  # idempotent
+            self._permanently_closed = True
+            connection = self.connection
+            session = self._session
+            self.connection = None
+            self._session = None
+
+        # Local-mode connection.close() releases the underlying LanceDB
+        # native handles. In subprocess mode the connection is a thin
+        # proxy whose lifecycle is owned by ``session.shutdown()`` —
+        # closing it separately would just bounce more RPCs to a worker
+        # we're about to kill.
+        if connection is not None and not self._subprocess_mode:
+            try:
+                close_result = connection.close()
+                if inspect.isawaitable(close_result):
+                    await close_result
+            except Exception as e:
+                logger.warning("Error closing LanceDB connection: %s", e)
+        if session is not None:
+            # ``session.shutdown()`` is sync and joins/terminates/kills the
+            # worker process — can take seconds. Offload to a worker thread
+            # so awaiting ``close()`` doesn't freeze the calling event loop.
+            try:
+                await asyncio.to_thread(session.shutdown)
+            except Exception as e:
+                logger.warning("Error shutting down LanceDB subprocess: %s", e)

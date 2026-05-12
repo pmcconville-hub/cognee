@@ -30,6 +30,7 @@ from ..embeddings.EmbeddingEngine import EmbeddingEngine
 from .serialize_data import serialize_data
 
 logger = get_logger("PGVectorAdapter")
+QUERY_BATCH_SIZE = 1000
 
 
 class IndexSchema(DataPoint):
@@ -300,36 +301,38 @@ class PGVectorAdapter(SQLAlchemyAdapter, VectorDBInterface):
             pgvector_data_points = list(deduped_by_id.values())
 
             # session.add_all(pgvector_data_points)
-            insert_statement = insert(PGVectorDataPoint).values(
-                [to_dict(data_point) for data_point in pgvector_data_points]
-            )
-            # On conflict, merge the `belongs_to_set` arrays so a DataPoint
-            # cognified into multiple datasets keeps every dataset tag. Take
-            # the incoming payload as the base (refreshing any other fields)
-            # and rewrite only `belongs_to_set` with the union of existing
-            # and incoming values. `collection_name` is cognee-controlled,
-            # not user input, so interpolation is safe.
-            quoted_table = f'"{collection_name}"'
-            merged_payload_expr = text(
-                f"""
-                jsonb_set(
-                    EXCLUDED.payload::jsonb,
-                    '{{belongs_to_set}}',
-                    (
-                        SELECT COALESCE(jsonb_agg(DISTINCT val), '[]'::jsonb)
-                        FROM jsonb_array_elements_text(
-                            COALESCE({quoted_table}.payload::jsonb->'belongs_to_set', '[]'::jsonb)
-                            || COALESCE(EXCLUDED.payload::jsonb->'belongs_to_set', '[]'::jsonb)
-                        ) AS val
-                    )
-                )::json
-                """
-            )
-            insert_statement = insert_statement.on_conflict_do_update(
-                index_elements=["id"],
-                set_={"payload": merged_payload_expr},
-            )
-            await session.execute(insert_statement)
+            point_dicts = [to_dict(data_point) for data_point in pgvector_data_points]
+
+            for start_index in range(0, len(point_dicts), QUERY_BATCH_SIZE):
+                point_batch = point_dicts[start_index : start_index + QUERY_BATCH_SIZE]
+                insert_statement = insert(PGVectorDataPoint).values(point_batch)
+                # On conflict, merge the `belongs_to_set` arrays so a DataPoint
+                # cognified into multiple datasets keeps every dataset tag. Take
+                # the incoming payload as the base (refreshing any other fields)
+                # and rewrite only `belongs_to_set` with the union of existing
+                # and incoming values. `collection_name` is cognee-controlled,
+                # not user input, so interpolation is safe.
+                quoted_table = f'"{collection_name}"'
+                merged_payload_expr = text(
+                    f"""
+                                jsonb_set(
+                                    EXCLUDED.payload::jsonb,
+                                    '{{belongs_to_set}}',
+                                    (
+                                        SELECT COALESCE(jsonb_agg(DISTINCT val), '[]'::jsonb)
+                                        FROM jsonb_array_elements_text(
+                                            COALESCE({quoted_table}.payload::jsonb->'belongs_to_set', '[]'::jsonb)
+                                            || COALESCE(EXCLUDED.payload::jsonb->'belongs_to_set', '[]'::jsonb)
+                                        ) AS val
+                                    )
+                                )::json
+                                """
+                )
+                insert_statement = insert_statement.on_conflict_do_update(
+                    index_elements=["id"],
+                    set_={"payload": merged_payload_expr},
+                )
+                await session.execute(insert_statement)
             await session.commit()
 
     async def create_vector_index(self, index_name: str, index_property_name: str):
@@ -385,14 +388,25 @@ class PGVectorAdapter(SQLAlchemyAdapter, VectorDBInterface):
             return []
 
         async with self.get_async_session() as session:
-            results = await session.execute(
-                select(PGVectorDataPoint).where(PGVectorDataPoint.c.id.in_(data_point_ids))
-            )
-            results = results.all()
+            results = []
+            for start_index in range(0, len(data_point_ids), QUERY_BATCH_SIZE):
+                id_batch = data_point_ids[start_index : start_index + QUERY_BATCH_SIZE]
+                batch_results = await session.execute(
+                    select(PGVectorDataPoint).where(PGVectorDataPoint.c.id.in_(id_batch))
+                )
+                results.extend(batch_results.all())
+
+            seen_ids = set()
+            unique_results = []
+            for result in results:
+                if result.id in seen_ids:
+                    continue
+                seen_ids.add(result.id)
+                unique_results.append(result)
 
             return [
                 ScoredResult(id=parse_id(result.id), payload=result.payload, score=0)
-                for result in results
+                for result in unique_results
             ]
 
     async def search(
@@ -537,9 +551,18 @@ class PGVectorAdapter(SQLAlchemyAdapter, VectorDBInterface):
         async with self.get_async_session() as session:
             # Get PGVectorDataPoint Table from database
             PGVectorDataPoint = await self.get_table(collection_name)
-            results = await session.execute(
-                delete(PGVectorDataPoint).where(PGVectorDataPoint.c.id.in_(data_point_ids))
-            )
+
+            results = None
+            if not data_point_ids:
+                results = await session.execute(
+                    delete(PGVectorDataPoint).where(PGVectorDataPoint.c.id.in_(data_point_ids))
+                )
+            else:
+                for start_index in range(0, len(data_point_ids), QUERY_BATCH_SIZE):
+                    id_batch = data_point_ids[start_index : start_index + QUERY_BATCH_SIZE]
+                    results = await session.execute(
+                        delete(PGVectorDataPoint).where(PGVectorDataPoint.c.id.in_(id_batch))
+                    )
             await session.commit()
             return results
 
