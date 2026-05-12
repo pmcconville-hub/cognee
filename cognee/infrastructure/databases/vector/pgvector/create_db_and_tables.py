@@ -98,7 +98,7 @@ async def delete_pg_database(dataset_database: DatasetDatabase):
                 {"db": dataset_database.vector_database_name},
             )
             await connection.execute(
-                text(f'DROP DATABASE "{dataset_database.vector_database_name}";')
+                text(f'DROP DATABASE IF EXISTS "{dataset_database.vector_database_name}";')
             )
         finally:
             await connection.close()

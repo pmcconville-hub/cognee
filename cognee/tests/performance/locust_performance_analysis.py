@@ -289,6 +289,8 @@ SHARED_DATASET_NAME = f"loadtest_shared_{uuid.uuid4().hex[:8]}"
 class SingleDatasetFlow(AddCognifySearchFlow):
     """All virtual users share the same dataset and API key."""
 
+    # TODO: Fix SingleDatasetFlow add/cognify/search operations keep being called async which makes perf measurements unreliable.
+    #       Cognify operation on a dataset that is currently being cognified returns early.
     def on_start(self):
         self.dataset_name = SHARED_DATASET_NAME
         self.api_key = self.user.environment.parsed_options.cognee_api_key or API_KEY
@@ -389,6 +391,7 @@ if __name__ == "__main__":
             "1",
             "--run-time",
             "5min",
+            "MultiDatasetCogneeTest",  # Run only the multi-dataset scenario
             *sys.argv[1:],
         ]
 
