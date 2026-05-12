@@ -27,6 +27,7 @@ from cognee.modules.graph.methods import (
     delete_data_nodes_and_edges,
     get_data_related_nodes,
     get_global_data_related_nodes,
+    get_orphaned_nodeset_labels_for_dataset,
     get_shared_slugs_losing_dataset_anchor,
 )
 from cognee.modules.graph.models import Node, Edge
@@ -551,10 +552,100 @@ async def test_get_shared_slugs_losing_dataset_anchor():
     logger.info("✅ test_get_shared_slugs_losing_dataset_anchor PASSED")
 
 
+@pytest.mark.asyncio
+async def test_get_orphaned_nodeset_labels_for_dataset():
+    """
+    The shared-slug scoped detag must strip NodeSet *names* (the values
+    stored in `belongs_to_set`), not dataset names. This helper returns
+    the NodeSet labels a `(dataset_id, data_id)` row is fully losing for
+    the dataset — i.e. NodeSet ledger rows it owns whose anchor no other
+    `(dataset_id, *)` row carries.
+
+    Ledger setup (single dataset `alfa`):
+      (alfa, maria)  owns NodeSet rows  ["T_only_maria", "T_shared"]
+      (alfa, marko)  owns NodeSet rows  ["T_shared", "T_only_marko"]
+      (alfa, maria)  also owns an Entity slug (unrelated, ignored).
+
+    Deleting (alfa, maria):
+      - `T_only_maria` → no other `(alfa, *)` row anchors this NodeSet → MUST be returned
+      - `T_shared`     → `(alfa, marko)` still anchors it → EXCLUDED
+      - `T_only_marko` → not owned by (alfa, maria) → EXCLUDED
+      - Entity row     → wrong `type` → EXCLUDED
+
+    Expected: only `T_only_maria` is returned.
+    """
+    data_directory_path = os.path.join(
+        pathlib.Path(__file__).parent.parent.parent.parent,
+        ".data_storage/test_orphaned_nodeset_labels",
+    )
+    cognee.config.data_root_directory(data_directory_path)
+
+    cognee_directory_path = os.path.join(
+        pathlib.Path(__file__).parent.parent.parent.parent,
+        ".cognee_system/test_orphaned_nodeset_labels",
+    )
+    cognee.config.system_root_directory(cognee_directory_path)
+
+    await cognee.prune.prune_data()
+    await cognee.prune.prune_system(metadata=True)
+    await setup()
+
+    user = await get_default_user()
+
+    dataset = await create_dataset("test_orphaned_nodeset_labels", user=user)
+    alfa_dataset_id = dataset.id
+
+    await set_database_global_context_variables(alfa_dataset_id, user.id)
+
+    maria_data_id = uuid4()
+    marko_data_id = uuid4()
+
+    t_only_maria_slug = uuid5(NAMESPACE_OID, "NodeSet:T_only_maria")
+    t_shared_slug = uuid5(NAMESPACE_OID, "NodeSet:T_shared")
+    t_only_marko_slug = uuid5(NAMESPACE_OID, "NodeSet:T_only_marko")
+    entity_slug = uuid5(NAMESPACE_OID, "Entity:apple")
+
+    def _make_node(slug, dataset_id, data_id, type_, label):
+        return Node(
+            id=uuid4(),
+            slug=slug,
+            user_id=user.id,
+            data_id=data_id,
+            dataset_id=dataset_id,
+            type=type_,
+            label=label,
+            indexed_fields=["name"],
+        )
+
+    rows = [
+        _make_node(t_only_maria_slug, alfa_dataset_id, maria_data_id, "NodeSet", "T_only_maria"),
+        _make_node(t_shared_slug, alfa_dataset_id, maria_data_id, "NodeSet", "T_shared"),
+        _make_node(t_shared_slug, alfa_dataset_id, marko_data_id, "NodeSet", "T_shared"),
+        _make_node(t_only_marko_slug, alfa_dataset_id, marko_data_id, "NodeSet", "T_only_marko"),
+        _make_node(entity_slug, alfa_dataset_id, maria_data_id, "Entity", "Apple"),
+    ]
+
+    db_engine = get_relational_engine()
+    async with db_engine.get_async_session() as session:
+        session.add_all(rows)
+        await session.commit()
+
+    result = await get_orphaned_nodeset_labels_for_dataset(alfa_dataset_id, maria_data_id)
+
+    assert sorted(result) == ["T_only_maria"], (
+        f"Expected only 'T_only_maria' to be returned (T_shared still anchored by marko; "
+        f"T_only_marko not owned by maria; Entity row excluded by type), got {result}"
+    )
+
+    logger.info("✅ test_get_orphaned_nodeset_labels_for_dataset PASSED")
+
+
 if __name__ == "__main__":
     import asyncio
 
     asyncio.run(test_get_data_related_nodes_excludes_shared())
     asyncio.run(test_delete_data_nodes_and_edges_removes_from_all_systems())
     asyncio.run(test_get_global_data_related_nodes_scopes_by_dataset())
+    asyncio.run(test_get_shared_slugs_losing_dataset_anchor())
+    asyncio.run(test_get_orphaned_nodeset_labels_for_dataset())
     asyncio.run(test_get_shared_slugs_losing_dataset_anchor())

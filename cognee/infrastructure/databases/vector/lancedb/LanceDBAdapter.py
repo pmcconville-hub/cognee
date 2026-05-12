@@ -462,57 +462,59 @@ class LanceDBAdapter(VectorDBInterface):
                             e,
                         )
 
-            def create_lance_data_point(data_point: DataPoint, vector: list[float]):
-                lance_cls, payload_model = _lance_cls_for(data_point)
-                properties = payload_model.model_validate(
-                    serialize_data(data_point.model_dump())
-                ).model_dump()
+                def create_lance_data_point(data_point: DataPoint, vector: list[float]):
+                    lance_cls, payload_model = _lance_cls_for(data_point)
+                    properties = payload_model.model_validate(
+                        serialize_data(data_point.model_dump())
+                    ).model_dump()
 
-                prior = existing_belongs_to_set.get(str(data_point.id))
-                if prior:
-                    incoming = properties.get("belongs_to_set") or []
-                    properties["belongs_to_set"] = list(dict.fromkeys(list(prior) + list(incoming)))
+                    prior = existing_belongs_to_set.get(str(data_point.id))
+                    if prior:
+                        incoming = properties.get("belongs_to_set") or []
+                        properties["belongs_to_set"] = list(
+                            dict.fromkeys(list(prior) + list(incoming))
+                        )
 
-                return lance_cls(
-                    id=str(data_point.id),
-                    vector=vector,
-                    payload=properties,
-                )
+                    return lance_cls(
+                        id=str(data_point.id),
+                        vector=vector,
+                        payload=properties,
+                    )
 
-            lance_data_points = [
-                create_lance_data_point(data_point, data_vectors[data_point_index])
-                for (data_point_index, data_point) in enumerate(data_points)
-            ]
+                lance_data_points = [
+                    create_lance_data_point(data_point, data_vectors[data_point_index])
+                    for (data_point_index, data_point) in enumerate(data_points)
+                ]
 
-            # Dedup by id within the batch — on duplicates, union
-            # `belongs_to_set` instead of keeping only the last
-            # occurrence. A plain dict-collapse would drop tags that
-            # only appeared on earlier siblings (mirrors the
-            # batch-merge logic in PGVectorAdapter.create_data_points
-            # and Neo4jAdapter.add_nodes).
-            deduped_lance_points: dict = {}
-            for dp in lance_data_points:
-                existing = deduped_lance_points.get(dp.id)
-                if existing is None:
+                # Dedup by id within the batch — on duplicates, union
+                # `belongs_to_set` instead of keeping only the last
+                # occurrence. A plain dict-collapse would drop tags that
+                # only appeared on earlier siblings (mirrors the
+                # batch-merge logic in PGVectorAdapter.create_data_points
+                # and Neo4jAdapter.add_nodes).
+                deduped_lance_points: dict = {}
+                for dp in lance_data_points:
+                    existing = deduped_lance_points.get(dp.id)
+                    if existing is None:
+                        deduped_lance_points[dp.id] = dp
+                        continue
+                    existing_payload = existing.payload.model_dump()
+                    incoming_payload = dp.payload.model_dump()
+                    existing_tags = existing_payload.get("belongs_to_set") or []
+                    incoming_tags = incoming_payload.get("belongs_to_set") or []
+                    if existing_tags or incoming_tags:
+                        merged_tags = list(dict.fromkeys(list(existing_tags) + list(incoming_tags)))
+                        incoming_payload["belongs_to_set"] = merged_tags
+                        dp.payload = type(dp.payload).model_validate(incoming_payload)
                     deduped_lance_points[dp.id] = dp
-                    continue
-                existing_payload = existing.payload.model_dump()
-                incoming_payload = dp.payload.model_dump()
-                existing_tags = existing_payload.get("belongs_to_set") or []
-                incoming_tags = incoming_payload.get("belongs_to_set") or []
-                if existing_tags or incoming_tags:
-                    merged_tags = list(dict.fromkeys(list(existing_tags) + list(incoming_tags)))
-                    incoming_payload["belongs_to_set"] = merged_tags
-                    dp.payload = type(dp.payload).model_validate(incoming_payload)
-                deduped_lance_points[dp.id] = dp
-            lance_data_points = list(deduped_lance_points.values())
+                lance_data_points = list(deduped_lance_points.values())
 
-            await (
-                collection.merge_insert("id")
-                .when_matched_update_all()
-                .when_not_matched_insert_all()
-                .execute(self._records_for_write(lance_data_points))
-            )
+                await (
+                    collection.merge_insert("id")
+                    .when_matched_update_all()
+                    .when_not_matched_insert_all()
+                    .execute(self._records_for_write(lance_data_points))
+                )
         except (ValueError, OSError, RuntimeError) as e:
             # Two LanceDB schema-drift failure modes are recoverable by rebuilding
             # the table via Pydantic validation (which fills defaults from the

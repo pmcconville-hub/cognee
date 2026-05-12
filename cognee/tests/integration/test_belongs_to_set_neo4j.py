@@ -267,3 +267,68 @@ async def test_remove_belongs_to_set_tags_prunes_edges_to_surviving_nodeset():
                 str(other_nodeset_id),
             ]
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not HAS_NEO4J, reason="neo4j extra not installed")
+async def test_remove_belongs_to_set_tags_is_atomic(monkeypatch):
+    """The two phases of the detag — property strip + edge prune — must
+    share a transaction. If the edge prune fails, the property strip must
+    roll back so the graph never observes a half-applied state where the
+    tag is gone from the property but the stale `belongs_to_set` edge
+    survives.
+
+    Simulated by patching `Neo4jAdapter.query` to raise on the merged
+    Cypher statement; the property must remain unchanged.
+    """
+    adapter = await _fresh_adapter()
+    node_id = uuid4()
+    nodeset_id = uuid4()
+
+    try:
+        await adapter.query(
+            "CREATE (:`__Node__`:NodeSet {id: $id, name: 'alfa'})",
+            {"id": str(nodeset_id)},
+        )
+        await adapter.add_nodes([_TaggedPoint(id=node_id, text="shared", belongs_to_set=["alfa"])])
+        await adapter.query(
+            "MATCH (n {id: $nid}), (ns {id: $nsid}) CREATE (n)-[:belongs_to_set]->(ns)",
+            {"nid": str(node_id), "nsid": str(nodeset_id)},
+        )
+
+        # Sanity: pre-state has the tag and the edge.
+        assert await _read_tag_property(adapter, node_id) == ["alfa"]
+
+        # Force the merged detag query to fail. Whitelist the harness
+        # queries (read-only MATCHes used by the test itself) so we can
+        # still inspect post-state. The merged write touches `SET` +
+        # `DELETE`, which the filter below catches.
+        original_query = adapter.query
+
+        async def failing_query(query, params=None):
+            if "SET n.belongs_to_set" in query and "DELETE r" in query:
+                raise RuntimeError("simulated edge-prune failure")
+            return await original_query(query, params)
+
+        monkeypatch.setattr(adapter, "query", failing_query)
+
+        with pytest.raises(RuntimeError, match="simulated edge-prune failure"):
+            await adapter.remove_belongs_to_set_tags(["alfa"], node_ids=[str(node_id)])
+
+        monkeypatch.undo()
+
+        # Property must still carry the tag — the failed transaction rolled back.
+        assert await _read_tag_property(adapter, node_id) == ["alfa"], (
+            "Property strip must roll back when the edge prune fails"
+        )
+
+        # Edge must also still exist for the same reason.
+        edges = await adapter.query(
+            "MATCH (n {id: $nid})-[:belongs_to_set]->(ns:NodeSet) RETURN ns.name AS name",
+            {"nid": str(node_id)},
+        )
+        assert [row["name"] for row in edges] == ["alfa"], (
+            "Edge must survive the failed transaction"
+        )
+    finally:
+        await adapter.delete_nodes([str(node_id), str(nodeset_id)])

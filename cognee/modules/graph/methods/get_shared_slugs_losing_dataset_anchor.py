@@ -20,11 +20,13 @@ async def get_shared_slugs_losing_dataset_anchor(
     exist in the graph because another `(dataset_id_other, data_id_other)`
     pair owns them.
 
-    These are the shared slugs whose stored `belongs_to_set` array still
-    carries the soon-to-be-removed dataset's name even though no surviving
-    ledger row anchors them to it anymore — callers reconcile the array
-    with a targeted `remove_belongs_to_set_tags([dataset_name], node_ids=...)`
-    pass so the property stays in sync with the edges.
+    These are the shared slugs whose stored `belongs_to_set` array may
+    still carry NodeSet names anchored only by `(dataset_id, data_id)`
+    even though no surviving ledger row anchors them to those NodeSets
+    anymore. Callers reconcile the array with a targeted
+    `remove_belongs_to_set_tags(orphaned_nodeset_labels, node_ids=...)`
+    pass — see `get_orphaned_nodeset_labels_for_dataset` for the tag list
+    — so the property stays in sync with the edges.
 
     Intentionally excludes slugs that are uniquely owned by
     `(dataset_id, data_id)`: those are hard-deleted upstream by

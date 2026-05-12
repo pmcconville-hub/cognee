@@ -319,30 +319,32 @@ class Neo4jAdapter(GraphDBInterface):
             return None
 
         id_filter = "AND n.id IN $node_ids" if node_ids is not None else ""
-        # Two passes under one params dict: property strip on matching
-        # nodes, then delete any lingering `belongs_to_set` edges from
-        # those same nodes to NodeSets whose name is being removed. The
-        # edge delete is independent of the property value post-strip,
-        # so it works whether the scoped path is detagging a shared
-        # node or the unscoped path is fanning out globally.
-        strip_property_query = f"""
+        node_scope_clause = "WHERE n.id IN $node_ids" if node_ids is not None else ""
+        edge_scope_keyword = "AND" if node_ids is not None else "WHERE"
+        # Single Cypher statement → single transaction. Two independent
+        # phases bridged by `WITH count(*)`: first strip the property on
+        # matching nodes, then match `belongs_to_set` edges to NodeSets
+        # whose name is being removed and delete them. The bridge keeps
+        # the phases sequenced (so phase 2 sees the post-SET graph) but
+        # decouples their match sets — an edge to a stale NodeSet is
+        # pruned even if the source node didn't carry the tag in its
+        # property array. If phase 2 fails, the whole transaction rolls
+        # back and the property is untouched — retry is safe.
+        query = f"""
         MATCH (n: `{BASE_LABEL}`)
         WHERE any(tag IN $tags WHERE tag IN coalesce(n.belongs_to_set, []))
         {id_filter}
         SET n.belongs_to_set = [x IN n.belongs_to_set WHERE NOT x IN $tags]
-        """
-        node_scope_clause = "WHERE n.id IN $node_ids" if node_ids is not None else ""
-        prune_edges_query = f"""
+        WITH count(*) AS _bridge
         MATCH (n: `{BASE_LABEL}`)-[r:belongs_to_set]->(ns:NodeSet)
         {node_scope_clause}
-        {"AND" if node_ids is not None else "WHERE"} ns.name IN $tags
+        {edge_scope_keyword} ns.name IN $tags
         DELETE r
         """
         params: Dict[str, Any] = {"tags": list(tags)}
         if node_ids is not None:
             params["node_ids"] = [str(nid) for nid in node_ids]
-        await self.query(strip_property_query, params)
-        await self.query(prune_edges_query, params)
+        await self.query(query, params)
         return None
 
     async def extract_node(self, node_id: str):
