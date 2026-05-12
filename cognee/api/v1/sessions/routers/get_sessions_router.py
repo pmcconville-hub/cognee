@@ -65,9 +65,7 @@ async def _child_agent_user_ids(user_id: UUIDType) -> list[UUIDType]:
         from cognee.modules.users.models import User as UserModel
 
         rows = (
-            await session.execute(
-                select(UserModel.id).where(UserModel.parent_user_id == user_id)
-            )
+            await session.execute(select(UserModel.id).where(UserModel.parent_user_id == user_id))
         ).all()
         return [row.id for row in rows]
 
@@ -283,7 +281,10 @@ def get_sessions_router() -> APIRouter:
         permitted = await _permitted_dataset_ids_for(user)
         visible_ids = await _visible_user_ids(user)
         row = await get_session_row(
-            session_id=session_id, user_id=user.id, user_ids=visible_ids, permitted_dataset_ids=permitted
+            session_id=session_id,
+            user_id=user.id,
+            user_ids=visible_ids,
+            permitted_dataset_ids=permitted,
         )
         if row is None:
             raise HTTPException(status_code=404, detail="session not found")
