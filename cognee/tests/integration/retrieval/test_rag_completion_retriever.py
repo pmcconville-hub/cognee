@@ -299,7 +299,9 @@ async def test_rag_completion_context_complex(setup_test_environment_with_chunks
 
 
 @pytest.mark.asyncio
-async def test_rag_completion_context_top_k_limits_results(setup_test_environment_with_chunks_complex):
+async def test_rag_completion_context_top_k_limits_results(
+    setup_test_environment_with_chunks_complex,
+):
     """Integration test: verify top_k parameter limits the number of retrieved chunks."""
     top_k = 2
     retriever = CompletionRetriever(top_k=top_k)
