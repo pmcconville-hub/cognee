@@ -153,32 +153,41 @@ class HandleRegistry:
         return self._handles.pop(hid, None)
 
 
-def set_pdeathsig() -> None:
+def set_pdeathsig() -> bool:
     """Linux only: ask the kernel to SIGTERM this process when the parent dies.
+
+    Returns ``True`` when the signal was successfully armed, ``False`` on any
+    other platform or if the prctl call failed. Callers use the return value
+    to decide whether the portable polling watchdog is still needed.
 
     No-op on other platforms. Complements ``daemon=True`` which is bypassed on
     abnormal parent termination.
     """
     if sys.platform != "linux":
-        return
+        return False
     try:
         PR_SET_PDEATHSIG = 1
         libc = ctypes.CDLL("libc.so.6", use_errno=True)
-        libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0)
+        rc = libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0)
+        return rc == 0
     except Exception:
-        pass
+        return False
 
 
 def start_parent_liveness_watchdog(poll_interval: float = 1.0) -> None:
     """Portable fallback for platforms without ``pdeathsig`` (macOS, Windows).
 
     Starts a daemon thread that polls ``os.getppid()``. When the original
-    parent dies the child is reparented (to init/launchd, typically pid 1),
-    so a ppid change is a reliable signal. The watchdog then terminates the
-    worker with ``os._exit`` to avoid orphaned DB processes holding file locks.
+    parent dies the child is reparented (typically to launchd/init), so a
+    ppid change is a reliable signal. The watchdog then terminates the worker
+    with ``os._exit`` to avoid orphaned DB processes holding file locks.
 
-    Redundant on Linux (``set_pdeathsig`` covers it) but cheap enough to run
-    everywhere as defense-in-depth.
+    Only checks for ``current_ppid != original_ppid``. An earlier version
+    also exited when ``current_ppid == 1`` as a heuristic for "reparented to
+    init" — but in container deployments the legitimate parent is frequently
+    pid 1 (cognee running as the container's entrypoint), which made the
+    watchdog kill workers on their very first poll. The ppid-change check
+    alone covers reparenting correctly in all cases.
     """
     import threading
 
@@ -193,7 +202,7 @@ def start_parent_liveness_watchdog(poll_interval: float = 1.0) -> None:
                 current_ppid = os.getppid()
             except Exception:
                 return
-            if current_ppid != original_ppid or current_ppid == 1:
+            if current_ppid != original_ppid:
                 # Parent is gone; exit fast without running atexit handlers
                 # (those may try to use resources owned by the dead parent).
                 os._exit(0)
@@ -275,8 +284,14 @@ def run_worker_loop(
     """Serialize all requests on a single event loop. Handlers may be sync or
     return a coroutine; coroutines are awaited on the worker's asyncio loop.
     """
-    set_pdeathsig()
-    start_parent_liveness_watchdog()
+    # pdeathsig is the authoritative parent-death signal on Linux. Only fall
+    # back to the portable polling watchdog when the kernel hook is
+    # unavailable (macOS, Windows) or failed to arm — that watchdog has no
+    # way to distinguish "legitimate parent happens to be pid 1" from
+    # "reparented to init", so we avoid running it whenever pdeathsig has
+    # us covered.
+    if not set_pdeathsig():
+        start_parent_liveness_watchdog()
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -465,22 +480,77 @@ class SubprocessSession:
     def touch(self) -> None:
         self._last_accessed_at = time.time()
 
-    def wait_for_ready(self) -> None:
+    def _init_diagnostics(self) -> str:
+        """Compact ``pid=… exitcode=… alive=…`` summary of the worker process,
+        included in init-failure messages so callers can tell a silent
+        ``os._exit(0)`` apart from a timeout where the child is still
+        running.
+        """
         try:
-            resp = self._resp_q.get(timeout=self._init_timeout)
-        except std_queue.Empty:
-            self._terminate()
-            self._closed = True
-            raise SubprocessTransportError(f"Subprocess init timed out after {self._init_timeout}s")
+            pid = self._proc.pid
+        except Exception:
+            pid = None
+        try:
+            exitcode = self._proc.exitcode
+        except Exception:
+            exitcode = None
+        try:
+            alive = self._proc.is_alive()
+        except Exception:
+            alive = None
+        return f"pid={pid} exitcode={exitcode} alive={alive}"
+
+    def _init_failure_message(self, reason: str) -> str:
+        return (
+            f"Subprocess init {reason} after {self._init_timeout}s "
+            f"({self._init_diagnostics()})"
+        )
+
+    def wait_for_ready(self) -> None:
+        # Poll the response queue in short slices so we notice if the child
+        # dies before producing a READY sentinel. A single blocking ``get``
+        # with the full init timeout hides that case entirely: the caller
+        # learns nothing beyond "60s elapsed" even when the child exited 50ms
+        # in. By interleaving ``is_alive()`` checks we can fail fast and
+        # surface the worker's pid / exitcode in the error message.
+        deadline = time.monotonic() + self._init_timeout
+        poll_interval = min(0.5, self._init_timeout) if self._init_timeout > 0 else 0.5
+        resp = None
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self._terminate()
+                self._closed = True
+                raise SubprocessTransportError(self._init_failure_message("timed out"))
+            try:
+                resp = self._resp_q.get(timeout=min(poll_interval, remaining))
+                break
+            except std_queue.Empty:
+                if not self._proc.is_alive():
+                    # Drain anything the child managed to queue before dying
+                    # (a Response with .error is common when init raised).
+                    try:
+                        resp = self._resp_q.get_nowait()
+                        break
+                    except std_queue.Empty:
+                        pass
+                    self._terminate()
+                    self._closed = True
+                    raise SubprocessTransportError(
+                        self._init_failure_message("exited before signalling ready")
+                    )
         if resp.error:
             self._terminate()
             self._closed = True
-            raise SubprocessTransportError(f"Subprocess init failed:\n{resp.error}")
+            raise SubprocessTransportError(
+                f"Subprocess init failed ({self._init_diagnostics()}):\n{resp.error}"
+            )
         if resp.result != _READY_SENTINEL:
             self._terminate()
             self._closed = True
             raise SubprocessTransportError(
-                f"Unexpected subprocess startup response: {resp.result!r}"
+                f"Unexpected subprocess startup response "
+                f"({self._init_diagnostics()}): {resp.result!r}"
             )
         # Only register in ``_all_sessions`` after the worker is actually
         # ready. Doing this in ``__init__`` exposed the session to
