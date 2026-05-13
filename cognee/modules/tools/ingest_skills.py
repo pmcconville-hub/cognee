@@ -14,6 +14,8 @@ deleted from both graph and vector stores, and every change gets a
 Called directly from ``cognee.remember(path, enrich=...)``.
 """
 
+import os
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Dict, List, Optional, Tuple, Union
@@ -27,6 +29,69 @@ from cognee.tasks.storage.add_data_points import add_data_points
 
 logger = get_logger("cognee.tools.ingest_skills")
 
+SKILL_SOURCE_ROOTS_ENV = "COGNEE_SKILL_SOURCE_ROOTS"
+
+
+def _configured_skill_source_roots() -> Tuple[Path, ...]:
+    """Return directories that are allowed to be probed for SKILL.md files."""
+    roots = [Path.cwd(), Path(tempfile.gettempdir())]
+    for raw_root in os.environ.get(SKILL_SOURCE_ROOTS_ENV, "").split(os.pathsep):
+        raw_root = raw_root.strip()
+        if raw_root:
+            roots.append(Path(raw_root).expanduser())
+
+    resolved_roots: list[Path] = []
+    for root in roots:
+        resolved_roots.append(root)
+        try:
+            resolved_root = root.resolve()
+            if resolved_root != root:
+                resolved_roots.append(resolved_root)
+        except (OSError, RuntimeError):
+            logger.debug("Ignoring unavailable skill source root: %s", root)
+    return tuple(resolved_roots)
+
+
+def _is_within_allowed_skill_root(path: Path) -> bool:
+    path_str = os.path.realpath(os.path.abspath(os.fspath(path)))
+    for root in _configured_skill_source_roots():
+        root_str = os.path.realpath(os.path.abspath(os.fspath(root)))
+        try:
+            if os.path.commonpath([path_str, root_str]) == root_str:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _resolve_skill_source_path(source: Union[str, Path]) -> Optional[Path]:
+    """Resolve a caller-provided skill path without allowing arbitrary probing."""
+    if isinstance(source, Path):
+        raw_path = source
+    elif isinstance(source, str):
+        stripped = source.strip()
+        if not stripped or "\x00" in stripped or "://" in stripped:
+            return None
+        raw_path = Path(stripped).expanduser()
+    else:
+        return None
+
+    try:
+        candidate = raw_path if raw_path.is_absolute() else Path.cwd() / raw_path
+        candidate = Path(os.path.realpath(os.path.abspath(os.fspath(candidate))))
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+    if not _is_within_allowed_skill_root(candidate):
+        logger.warning(
+            "Rejected skill source outside allowed roots: %s. Set %s to allow another root.",
+            candidate,
+            SKILL_SOURCE_ROOTS_ENV,
+        )
+        return None
+
+    return candidate
+
 
 def _is_skill_entry(path: Path) -> bool:
     return path.is_file() and path.name.lower() == "skill.md"
@@ -36,9 +101,9 @@ def looks_like_skill_source(data) -> bool:
     """Return True when ``data`` is a SKILL.md file, a directory containing
     SKILL.md files at any depth, or a directory of skill folders.
     """
-    if not isinstance(data, str):
+    path = _resolve_skill_source_path(data)
+    if path is None:
         return False
-    path = Path(data)
     try:
         if _is_skill_entry(path):
             return True
@@ -189,7 +254,13 @@ async def add_skills(
         parse_skills_folder,
     )
 
-    path = Path(source).expanduser().resolve()
+    path = _resolve_skill_source_path(source)
+    if path is None:
+        raise PermissionError(
+            f"Skill source must be under the current working directory, system temp directory, "
+            f"or a root listed in {SKILL_SOURCE_ROOTS_ENV}: {source}"
+        )
+
     if path.is_dir():
         parsed = parse_skills_folder(path, source_repo=source_repo, base_dir=path)
     elif path.is_file():

@@ -93,6 +93,23 @@ class TestSkillIngest(unittest.TestCase):
 
             shutil.rmtree(folder)
 
+    def test_skill_source_path_rejects_paths_outside_allowed_roots(self):
+        from pathlib import Path
+
+        from cognee.modules.tools import looks_like_skill_source
+        from cognee.modules.tools.ingest_skills import _resolve_skill_source_path, add_skills
+
+        outside_allowed_roots = Path(tempfile.gettempdir()) / "outside-skills"
+        with patch(
+            "cognee.modules.tools.ingest_skills._configured_skill_source_roots",
+            return_value=(Path.cwd(),),
+        ):
+            assert _resolve_skill_source_path(outside_allowed_roots) is None
+            assert not looks_like_skill_source(str(outside_allowed_roots))
+
+            with self.assertRaises(PermissionError):
+                self._run(add_skills(str(outside_allowed_roots), enrich=False))
+
     def test_add_skills_persists_canonical_skill(self):
         from cognee.modules.tools.ingest_skills import add_skills
 
