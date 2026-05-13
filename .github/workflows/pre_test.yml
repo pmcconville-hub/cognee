@@ -19,7 +19,12 @@ jobs:
           enable-cache: true
 
       - name: Validate uv lockfile and project metadata
-        run: uv lock --check || { echo "'uv lock --check' failed."; echo "Run 'uv lock' and push your changes."; exit 1; }
+        run: |
+          # Get timestamp for 2 days ago in UTC (ISO 8601 format)
+          CUTOFF=$(date -u -v -2d +"%Y-%m-%dT%H:%M:%SZ")
+
+          # Run uv lock check with dynamic cutoff
+          uv lock --check --cutoff "$CUTOFF" || { echo "'uv lock --check' failed."; echo "Run 'uv lock' and push your changes."; exit 1; }
 
       - name: Run pre-commit hooks
         uses: pre-commit/action@v3.0.1
