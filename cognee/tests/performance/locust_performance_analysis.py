@@ -305,7 +305,8 @@ class SingleDatasetCogneeTest(HttpUser):
 
     tasks = [SingleDatasetFlow]
     wait_time = between(5, 10)
-    weight = 1
+    # TODO: Return weight when scenario is fixed to handle concurrent cognify calls on the same dataset.
+    weight = 0
 
 
 if __name__ == "__main__":
