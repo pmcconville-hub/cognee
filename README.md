@@ -203,26 +203,6 @@ export COGNEE_API_KEY="ck_..."
 
 The plugin hooks into Claude Code's lifecycle — `SessionStart` initializes memory, `PostToolUse` captures actions, `UserPromptSubmit` injects relevant context, `PreCompact` preserves memory across context resets, and `SessionEnd` bridges session data into the permanent graph.
 
-### Hermes Agent
-
-Enable Cognee as the memory provider in [Hermes Agent](https://github.com/NousResearch/hermes-agent) for session-aware knowledge graph memory with auto-routing recall.
-
-**Setup:**
-
-```yaml
-# ~/.hermes/config.yaml
-memory:
-  provider: cognee
-```
-
-```bash
-export LLM_API_KEY="your-openai-key"
-hermes  # start chatting — session memory and graph persistence are automatic
-```
-
-Or run `hermes memory setup` and select Cognee. For Cognee Cloud, set `COGNEE_SERVICE_URL` and `COGNEE_API_KEY` in `~/.hermes/.env`.
-
-
 ### Connect to Cognee Cloud
 
 Point any Python agent at a managed Cognee instance — all SDK calls route to the cloud:
