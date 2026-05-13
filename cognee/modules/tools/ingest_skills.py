@@ -52,14 +52,22 @@ def _configured_skill_source_roots() -> Tuple[Path, ...]:
     return tuple(resolved_roots)
 
 
-def _is_within_allowed_skill_root(path: Path) -> bool:
-    path_str = os.path.realpath(os.path.abspath(os.fspath(path)))
+def _normalize_skill_path(path: str) -> str:
+    return os.path.normpath(os.path.realpath(os.path.abspath(os.path.expanduser(path))))
+
+
+def _has_allowed_skill_root(path_str: str, root_str: str) -> bool:
+    root_prefix = root_str if root_str.endswith(os.sep) else f"{root_str}{os.sep}"
+    return path_str == root_str or path_str.startswith(root_prefix)
+
+
+def _is_within_allowed_skill_root(path_str: str) -> bool:
     for root in _configured_skill_source_roots():
-        root_str = os.path.realpath(os.path.abspath(os.fspath(root)))
+        root_str = _normalize_skill_path(os.fspath(root))
         try:
-            if os.path.commonpath([path_str, root_str]) == root_str:
+            if _has_allowed_skill_root(path_str, root_str):
                 return True
-        except ValueError:
+        except (OSError, ValueError):
             continue
     return False
 
@@ -67,18 +75,17 @@ def _is_within_allowed_skill_root(path: Path) -> bool:
 def _resolve_skill_source_path(source: Union[str, Path]) -> Optional[Path]:
     """Resolve a caller-provided skill path without allowing arbitrary probing."""
     if isinstance(source, Path):
-        raw_path = source
+        raw_path = os.fspath(source)
     elif isinstance(source, str):
-        stripped = source.strip()
-        if not stripped or "\x00" in stripped or "://" in stripped:
+        raw_path = source.strip()
+        if not raw_path or "\x00" in raw_path or "://" in raw_path:
             return None
-        raw_path = Path(stripped).expanduser()
     else:
         return None
 
     try:
-        candidate = raw_path if raw_path.is_absolute() else Path.cwd() / raw_path
-        candidate = Path(os.path.realpath(os.path.abspath(os.fspath(candidate))))
+        candidate = raw_path if os.path.isabs(raw_path) else os.path.join(os.getcwd(), raw_path)
+        candidate = _normalize_skill_path(candidate)
     except (OSError, RuntimeError, ValueError):
         return None
 
@@ -90,7 +97,7 @@ def _resolve_skill_source_path(source: Union[str, Path]) -> Optional[Path]:
         )
         return None
 
-    return candidate
+    return Path(candidate)
 
 
 def _is_skill_entry(path: Path) -> bool:
