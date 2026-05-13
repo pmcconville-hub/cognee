@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import ctypes
+import ctypes.util
 import itertools
 import os
 import pickle
@@ -160,6 +161,12 @@ def set_pdeathsig() -> bool:
     other platform or if the prctl call failed. Callers use the return value
     to decide whether the portable polling watchdog is still needed.
 
+    Resolves libc via ``ctypes.util.find_library`` rather than hard-coding
+    ``libc.so.6`` so musl-based distros (Alpine) and other non-glibc Linuxes
+    still arm pdeathsig instead of silently falling through to the polling
+    watchdog — which would re-expose the Docker-PID-1 hang this module was
+    built to prevent.
+
     No-op on other platforms. Complements ``daemon=True`` which is bypassed on
     abnormal parent termination.
     """
@@ -167,7 +174,13 @@ def set_pdeathsig() -> bool:
         return False
     try:
         PR_SET_PDEATHSIG = 1
-        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        # ``find_library`` returns the SONAME of the system libc (e.g.
+        # ``libc.so.6`` on glibc, ``libc.musl-x86_64.so.1`` on Alpine).
+        # Passing ``None`` to ``CDLL`` opens the main program's symbol table
+        # which on Linux includes the dynamic linker's libc symbols — used as
+        # a last-ditch fallback if ``find_library`` returns nothing (rare).
+        libc_name = ctypes.util.find_library("c")
+        libc = ctypes.CDLL(libc_name, use_errno=True) if libc_name else ctypes.CDLL(None)
         rc = libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0)
         return rc == 0
     except Exception:
@@ -175,7 +188,13 @@ def set_pdeathsig() -> bool:
 
 
 def start_parent_liveness_watchdog(poll_interval: float = 1.0) -> None:
-    """Portable fallback for platforms without ``pdeathsig`` (macOS, Windows).
+    """Portable fallback when ``set_pdeathsig`` is unavailable or failed.
+
+    Used on macOS, Windows, and on Linux configurations where the prctl call
+    in ``set_pdeathsig`` did not succeed (no libc found, sandboxed prctl,
+    etc.). The call site in ``run_worker_loop`` gates this watchdog behind
+    ``set_pdeathsig()`` returning ``False`` so a successfully-armed kernel
+    signal isn't shadowed by a redundant polling thread.
 
     Starts a daemon thread that polls ``os.getppid()``. When the original
     parent dies the child is reparented (typically to launchd/init), so a
@@ -519,6 +538,13 @@ class SubprocessSession:
         ``is_alive() == False`` can return ``Empty`` even when data is in
         flight. Poll for a short bounded window so legitimate worker-side
         errors aren't lost.
+
+        ``multiprocessing.Queue`` can also raise ``EOFError`` / ``OSError``
+        when the underlying pipe is closed or corrupted (e.g. the worker
+        died mid-``put``). We treat those the same as "no message recovered"
+        and fall through to the caller's diagnostic path — surfacing a raw
+        pipe error here would mask the much more useful "exited before
+        signalling ready" message with ``pid=… exitcode=…`` context.
         """
         deadline = time.monotonic() + self._POST_DEATH_DRAIN_TIMEOUT
         while True:
@@ -528,6 +554,9 @@ class SubprocessSession:
                 if time.monotonic() >= deadline:
                     return None
                 time.sleep(self._POST_DEATH_DRAIN_POLL)
+            except (EOFError, OSError):
+                # Pipe closed/corrupted — no salvageable response.
+                return None
 
     def wait_for_ready(self) -> None:
         # Poll the response queue in short slices so we notice if the child
