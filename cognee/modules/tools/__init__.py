@@ -1,6 +1,7 @@
 """Tool subsystem: dispatcher, registry, built-in tools, and loaders."""
 
 from cognee.modules.tools.execute_tool import execute_tool
+from cognee.modules.tools.ingest_profiles import add_profiles, looks_like_profile_source
 from cognee.modules.tools.ingest_skills import add_skills, looks_like_skill_source
 from cognee.modules.tools.registry import (
     get_tool,
@@ -13,9 +14,11 @@ from cognee.modules.tools import builtin as _builtin  # noqa: F401
 
 __all__ = [
     "add_skills",
+    "add_profiles",
     "execute_tool",
     "get_tool",
     "list_tools_for_dataset",
     "looks_like_skill_source",
+    "looks_like_profile_source",
     "register_builtin_tool",
 ]

@@ -761,9 +761,14 @@ async def _remember_inner(
     # writes, even when the API server was never started.
     await _ensure_migrations_run()
 
-    # Auto-dispatch: a SKILL.md file or directory of SKILL.md files is persisted
-    # as Skill DataPoints rather than run through the chunk+extract pipeline.
-    from cognee.modules.tools import add_skills, looks_like_skill_source
+    # Auto-dispatch: capability package files are persisted as first-class
+    # profile/skill DataPoints rather than run through chunk+extract.
+    from cognee.modules.tools import (
+        add_profiles,
+        add_skills,
+        looks_like_profile_source,
+        looks_like_skill_source,
+    )
 
     # Pop skill-ingest kwargs before the regular add/cognify path so callers
     # can pass them safely even when the input is not a skill source.
@@ -771,6 +776,54 @@ async def _remember_inner(
     improve = bool(kwargs.pop("improve", False))
     improve_min_runs = int(kwargs.pop("improve_min_runs", 3))
     improve_score_threshold = float(kwargs.pop("improve_score_threshold", 0.5))
+
+    def _requested_node_set(default: str) -> str:
+        requested_node_set = kwargs.get("node_set") or [default]
+        if isinstance(requested_node_set, str):
+            return requested_node_set
+        if requested_node_set:
+            return requested_node_set[0]
+        return default
+
+    if looks_like_profile_source(data):
+        from cognee.modules.engine.operations.setup import setup
+
+        await setup()
+
+        user = kwargs.get("user")
+        dataset_id = kwargs.get("dataset_id")
+        dataset_ref = dataset_id or dataset_name
+        user, authorized_datasets = await resolve_authorized_user_datasets(dataset_ref, user)
+        dataset = authorized_datasets[0]
+        profiles_node_set = _requested_node_set("profiles")
+
+        package = await add_profiles(
+            data,
+            node_set=profiles_node_set,
+            user=user,
+            dataset=dataset,
+        )
+
+        result = RememberResult(
+            status="completed",
+            dataset_name=dataset.name,
+            dataset_id=str(dataset.id),
+            session_ids=None,
+        )
+        result.elapsed_seconds = time.monotonic() - result._started_at
+        result.items_processed = len(package.items)
+        result.items = [
+            {"name": agent.name, "kind": "agent_profile", "declared_tools": agent.declared_tools}
+            for agent in package.agents
+        ]
+        result.items.extend(
+            {"name": memory.name, "kind": "memory_profile"} for memory in package.memories
+        )
+        result.items.extend(
+            {"name": skill.name, "kind": "skill", "declared_tools": skill.declared_tools}
+            for skill in package.skills
+        )
+        return result
 
     if looks_like_skill_source(data):
         from cognee.modules.engine.operations.setup import setup
@@ -783,13 +836,7 @@ async def _remember_inner(
         user, authorized_datasets = await resolve_authorized_user_datasets(dataset_ref, user)
         dataset = authorized_datasets[0]
 
-        requested_node_set = kwargs.get("node_set") or ["skills"]
-        if isinstance(requested_node_set, str):
-            skills_node_set = requested_node_set
-        elif requested_node_set:
-            skills_node_set = requested_node_set[0]
-        else:
-            skills_node_set = "skills"
+        skills_node_set = _requested_node_set("skills")
 
         skills = await add_skills(
             data,

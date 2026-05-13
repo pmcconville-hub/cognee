@@ -14,3 +14,4 @@ from .SkillInspection import SkillInspection, InspectionResult
 from .SkillAmendment import SkillAmendment, AmendmentProposal
 from .SkillChangeEvent import SkillChangeEvent
 from .Tool import Tool
+from .Profile import AgentProfile, MemoryProfile

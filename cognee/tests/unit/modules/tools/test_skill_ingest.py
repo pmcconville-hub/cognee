@@ -24,6 +24,7 @@ What this DOESN'T cover (requires LLM + real DB — integration tests):
 from __future__ import annotations
 
 import asyncio
+import importlib
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -58,11 +59,16 @@ descriptions.
 def _make_skills_dir(body: str, entry_name: str = "SKILL.md"):
     from pathlib import Path
 
-    tmp = Path(tempfile.mkdtemp())
+    tmp = Path(tempfile.mkdtemp(dir=Path.cwd()))
     skill_dir = tmp / "summarize"
     skill_dir.mkdir()
     (skill_dir / entry_name).write_text(body)
     return tmp
+
+
+def _patch_storage_add_data_points():
+    add_data_points_module = importlib.import_module("cognee.tasks.storage.add_data_points")
+    return patch.object(add_data_points_module, "add_data_points", new_callable=AsyncMock)
 
 
 class TestSkillIngest(unittest.TestCase):
@@ -329,10 +335,7 @@ class TestSkillIngest(unittest.TestCase):
         skill = Skill(name="summarize", description="Summarize text.")
 
         async def _run():
-            with patch(
-                "cognee.tasks.storage.add_data_points.add_data_points",
-                new_callable=AsyncMock,
-            ) as mock_add:
+            with _patch_storage_add_data_points() as mock_add:
                 await AgenticRetriever._record_skill_runs([skill], "summarize this", "done")
                 return mock_add.await_args.args[0][0]
 
@@ -411,10 +414,7 @@ class TestSkillIngest(unittest.TestCase):
         ]
 
         async def _run():
-            with patch(
-                "cognee.tasks.storage.add_data_points.add_data_points",
-                new_callable=AsyncMock,
-            ) as mock_add:
+            with _patch_storage_add_data_points() as mock_add:
                 await AgenticRetriever._record_skill_runs([skill], "task", "done", tool_trace=trace)
                 return mock_add.await_args.args[0][0]
 
@@ -432,10 +432,7 @@ class TestSkillIngest(unittest.TestCase):
         skill = Skill(name="summarize", description="Summarize text.")
 
         async def _run():
-            with patch(
-                "cognee.tasks.storage.add_data_points.add_data_points",
-                new_callable=AsyncMock,
-            ) as mock_add:
+            with _patch_storage_add_data_points() as mock_add:
                 await AgenticRetriever._record_skill_runs([skill], "task", "done")
                 return mock_add.await_args.args[0][0]
 

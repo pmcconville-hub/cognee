@@ -15,7 +15,6 @@ Called directly from ``cognee.remember(path, enrich=...)``.
 """
 
 import os
-import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Dict, List, Optional, Tuple, Union
@@ -23,6 +22,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 from cognee.modules.engine.models import Skill
 from cognee.modules.pipelines.models import PipelineContext
+from cognee.modules.tools.path_safety import trusted_is_dir, trusted_is_file, trusted_rglob
 from cognee.shared.logging_utils import get_logger
 from cognee.tasks.storage.add_data_points import add_data_points
 
@@ -34,7 +34,7 @@ SKILL_SOURCE_ROOTS_ENV = "COGNEE_SKILL_SOURCE_ROOTS"
 
 def _configured_skill_source_roots() -> Tuple[Path, ...]:
     """Return directories that are allowed to be probed for SKILL.md files."""
-    roots = [Path.cwd(), Path(tempfile.gettempdir())]
+    roots = [Path.cwd()]
     for raw_root in os.environ.get(SKILL_SOURCE_ROOTS_ENV, "").split(os.pathsep):
         raw_root = raw_root.strip()
         if raw_root:
@@ -61,15 +61,24 @@ def _has_allowed_skill_root(path_str: str, root_str: str) -> bool:
     return path_str == root_str or path_str.startswith(root_prefix)
 
 
-def _is_within_allowed_skill_root(path_str: str) -> bool:
+def _resolve_candidate_under_root(raw_path: str, root: Path) -> Optional[str]:
+    root_str = _normalize_skill_path(os.fspath(root))
+    candidate = raw_path if os.path.isabs(raw_path) else os.path.join(root_str, raw_path)
+    candidate = _normalize_skill_path(candidate)
+    if _has_allowed_skill_root(candidate, root_str):
+        return candidate
+    return None
+
+
+def _resolve_under_allowed_skill_root(raw_path: str) -> Optional[str]:
     for root in _configured_skill_source_roots():
-        root_str = _normalize_skill_path(os.fspath(root))
         try:
-            if _has_allowed_skill_root(path_str, root_str):
-                return True
+            candidate = _resolve_candidate_under_root(raw_path, root)
+            if candidate is not None:
+                return candidate
         except (OSError, ValueError):
             continue
-    return False
+    return None
 
 
 def _resolve_skill_source_path(source: Union[str, Path]) -> Optional[Path]:
@@ -84,15 +93,14 @@ def _resolve_skill_source_path(source: Union[str, Path]) -> Optional[Path]:
         return None
 
     try:
-        candidate = raw_path if os.path.isabs(raw_path) else os.path.join(os.getcwd(), raw_path)
-        candidate = _normalize_skill_path(candidate)
+        candidate = _resolve_under_allowed_skill_root(raw_path)
     except (OSError, RuntimeError, ValueError):
         return None
 
-    if not _is_within_allowed_skill_root(candidate):
+    if candidate is None:
         logger.warning(
             "Rejected skill source outside allowed roots: %s. Set %s to allow another root.",
-            candidate,
+            raw_path,
             SKILL_SOURCE_ROOTS_ENV,
         )
         return None
@@ -101,7 +109,7 @@ def _resolve_skill_source_path(source: Union[str, Path]) -> Optional[Path]:
 
 
 def _is_skill_entry(path: Path) -> bool:
-    return path.is_file() and path.name.lower() == "skill.md"
+    return trusted_is_file(path) and path.name.lower() == "skill.md"
 
 
 def looks_like_skill_source(data) -> bool:
@@ -114,8 +122,10 @@ def looks_like_skill_source(data) -> bool:
     try:
         if _is_skill_entry(path):
             return True
-        if path.is_dir():
-            return any(p.name.lower() == "skill.md" for p in path.rglob("*") if p.is_file())
+        if trusted_is_dir(path):
+            return any(
+                p.name.lower() == "skill.md" for p in trusted_rglob(path, "*") if trusted_is_file(p)
+            )
     except OSError:
         return False
     return False
@@ -264,13 +274,13 @@ async def add_skills(
     path = _resolve_skill_source_path(source)
     if path is None:
         raise PermissionError(
-            f"Skill source must be under the current working directory, system temp directory, "
-            f"or a root listed in {SKILL_SOURCE_ROOTS_ENV}: {source}"
+            f"Skill source must be under the current working directory or a root "
+            f"listed in {SKILL_SOURCE_ROOTS_ENV}: {source}"
         )
 
-    if path.is_dir():
+    if trusted_is_dir(path):
         parsed = parse_skills_folder(path, source_repo=source_repo, base_dir=path)
-    elif path.is_file():
+    elif trusted_is_file(path):
         one = parse_skill_file(path, source_repo=source_repo, base_dir=path.parent)
         parsed = [one] if one is not None else []
     else:

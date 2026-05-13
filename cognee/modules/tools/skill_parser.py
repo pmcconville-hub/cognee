@@ -16,6 +16,7 @@ Required for a valid skill: a non-empty name (or inferable from folder/file name
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -24,6 +25,13 @@ from uuid import UUID, uuid5
 import yaml
 
 from cognee.modules.engine.models.Skill import Skill, SkillResource
+from cognee.modules.tools.path_safety import (
+    trusted_is_dir,
+    trusted_is_file,
+    trusted_iterdir,
+    trusted_read_text,
+    trusted_rglob,
+)
 from cognee.shared.logging_utils import get_logger
 
 logger = get_logger(__name__)
@@ -35,6 +43,7 @@ SKILL_ENTRY_CANDIDATES = ["SKILL.md", "skill.md", "Skill.md"]
 
 # README.md accepted only when the folder contains no other .md file that looks like a skill
 README_CANDIDATES = ["README.md", "readme.md"]
+NON_SKILL_ENTRY_NAMES = {"agent.md", "memory.md", "agents.md"}
 
 RESOURCE_TYPE_MAP = {
     "scripts": "script",
@@ -86,10 +95,12 @@ def _is_binary(path: Path) -> bool:
 
 def _is_relative_to(path: Path, base_dir: Path) -> bool:
     try:
-        path.resolve().relative_to(base_dir.resolve())
-        return True
-    except ValueError:
+        path_str = os.path.normpath(os.path.realpath(os.path.abspath(os.fspath(path))))
+        base_str = os.path.normpath(os.path.realpath(os.path.abspath(os.fspath(base_dir))))
+    except (OSError, RuntimeError, ValueError):
         return False
+    base_prefix = base_str if base_str.endswith(os.sep) else f"{base_str}{os.sep}"
+    return path_str == base_str or path_str.startswith(base_prefix)
 
 
 def _read_text_safe(
@@ -100,10 +111,10 @@ def _read_text_safe(
     if _is_binary(path):
         return None
     if base_dir is not None and not _is_relative_to(path, base_dir):
-        logger.warning("Skipping skill resource outside allowed base directory: %s", path)
+        logger.warning("Skipping skill resource outside allowed base directory")
         return None
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        text = trusted_read_text(path, encoding="utf-8", errors="replace")
         if len(text) > max_chars:
             text = text[:max_chars] + "\n... [truncated]"
         return text
@@ -283,13 +294,13 @@ def _find_skill_file(skill_dir: Path) -> Optional[Path]:
     """Return the skill entry file inside a directory, trying multiple names."""
     for name in SKILL_ENTRY_CANDIDATES:
         p = skill_dir / name
-        if p.is_file():
+        if trusted_is_file(p):
             return p
 
     # Accept README.md only if there's no other .md file that could be a skill
     for name in README_CANDIDATES:
         p = skill_dir / name
-        if p.is_file():
+        if trusted_is_file(p):
             return p
 
     return None
@@ -301,11 +312,11 @@ def _scan_resources(
     base_dir: Optional[Path] = None,
 ) -> List[SkillResource]:
     resources: List[SkillResource] = []
-    for item in sorted(skill_dir.rglob("*")):
-        if not item.is_file() or item == entry_file:
+    for item in sorted(trusted_rglob(skill_dir, "*")):
+        if not trusted_is_file(item) or item == entry_file:
             continue
         if base_dir is not None and not _is_relative_to(item, base_dir):
-            logger.warning("Skipping skill resource outside allowed base directory: %s", item)
+            logger.warning("Skipping skill resource outside allowed base directory")
             continue
         rel_path = str(item.relative_to(skill_dir))
         resource_type = _classify_resource(item, skill_dir)
@@ -349,10 +360,10 @@ def parse_skill_file(
     if base_dir is not None and not _is_relative_to(skill_md, base_dir):
         raise ValueError(f"Skill file is outside the allowed base directory: {skill_md}")
 
-    if not skill_md.is_file():
+    if not trusted_is_file(skill_md):
         return None
 
-    raw_text = skill_md.read_text(encoding="utf-8")
+    raw_text = trusted_read_text(skill_md, encoding="utf-8")
     if not raw_text.strip():
         return None
 
@@ -466,9 +477,9 @@ def parse_skills_folder(
         List of Skill DataPoints, one per valid skill found.
     """
     skills_root = Path(skills_root)
-    if not skills_root.is_dir():
+    if not trusted_is_dir(skills_root):
         raise FileNotFoundError(f"Skills directory not found: {skills_root}")
-    base_dir = Path(base_dir).resolve() if base_dir is not None else skills_root.resolve()
+    base_dir = Path(base_dir) if base_dir is not None else skills_root
 
     if not source_repo:
         source_repo = skills_root.name
@@ -477,8 +488,8 @@ def parse_skills_folder(
     skills: List[Skill] = []
 
     # Pass 1: subfolder skills
-    for child in sorted(skills_root.iterdir()):
-        if not child.is_dir():
+    for child in sorted(trusted_iterdir(skills_root)):
+        if not trusted_is_dir(child):
             continue
         skill = parse_skill_folder(child, source_repo=source_repo, base_dir=base_dir)
         if skill is not None:
@@ -486,8 +497,10 @@ def parse_skills_folder(
             skills.append(skill)
 
     # Pass 2: flat .md files at root (skip if already covered by a folder)
-    for child in sorted(skills_root.iterdir()):
-        if not child.is_file() or child.suffix.lower() != ".md":
+    for child in sorted(trusted_iterdir(skills_root)):
+        if not trusted_is_file(child) or child.suffix.lower() != ".md":
+            continue
+        if child.name.lower() in NON_SKILL_ENTRY_NAMES:
             continue
 
         skill_key = (
