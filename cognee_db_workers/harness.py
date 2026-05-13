@@ -154,6 +154,42 @@ class HandleRegistry:
         return self._handles.pop(hid, None)
 
 
+# Annotations for the most common SIGKILL/SIGTERM/SIGSEGV/SIGABRT scenarios.
+# Keeps the diagnostic message immediately actionable instead of requiring
+# the reader to know what each signal usually means in production. Kept
+# small on purpose — only the signals we actually want to flag with extra
+# context get an entry; everything else falls back to just the signal name.
+_SIGNAL_HINTS: Dict[str, str] = {
+    "SIGKILL": "likely OOM kill or `docker kill`",
+    "SIGSEGV": "native crash — check faulthandler dump in worker stderr",
+    "SIGABRT": "abort/assert in native code",
+    "SIGTERM": "external termination (parent shutdown or platform stop)",
+    "SIGBUS": "bad memory access in native code",
+    "SIGFPE": "arithmetic error in native code",
+}
+
+
+def _describe_exitcode(exitcode: Optional[int]) -> str:
+    """Render an exitcode for human consumption.
+
+    ``None`` and non-negative codes pass through unchanged; negative codes
+    are decoded into the signal that killed the worker (``-9`` → ``SIGKILL``)
+    with a short hint about the typical cause in production. POSIX exit
+    semantics: ``multiprocessing.Process.exitcode`` is the negated signal
+    number when the child died from an uncaught signal.
+    """
+    if exitcode is None or exitcode >= 0:
+        return str(exitcode)
+    try:
+        sig = signal.Signals(-exitcode)
+    except (ValueError, AttributeError):
+        return str(exitcode)
+    hint = _SIGNAL_HINTS.get(sig.name)
+    if hint:
+        return f"{exitcode} ({sig.name} — {hint})"
+    return f"{exitcode} ({sig.name})"
+
+
 def set_pdeathsig() -> bool:
     """Linux only: ask the kernel to SIGTERM this process when the parent dies.
 
@@ -294,6 +330,33 @@ class spawn_without_main:
 Dispatcher = Callable[[HandleRegistry, Request], Any]
 
 
+def _enable_faulthandler() -> None:
+    """Install Python's ``faulthandler`` so a native crash inside the worker
+    (Kuzu / LanceDB C++) dumps the Python traceback that triggered it to
+    stderr before the process dies. Without this, segfaults surface to the
+    parent as a bare ``exitcode=-11`` with no context about which query or
+    handler was on the stack.
+
+    Set ``SUBPROCESS_FAULTHANDLER_DISABLED=1`` to opt out (e.g. when running
+    under a debugger that wants to handle SIGSEGV itself).
+    """
+    if os.environ.get("SUBPROCESS_FAULTHANDLER_DISABLED") == "1":
+        return
+    try:
+        import faulthandler
+
+        # ``sys.__stderr__`` is the real fd 2 the worker inherited from the
+        # parent. ``sys.stderr`` may have been wrapped by an embedding host;
+        # the underlying file descriptor is what container log collectors
+        # capture, so prefer it.
+        faulthandler.enable(file=sys.__stderr__ or sys.stderr, all_threads=True)
+    except Exception:
+        # Best-effort: if faulthandler can't be enabled (no usable stderr,
+        # etc.) we just lose this diagnostic. Don't crash the worker over a
+        # debugging aid.
+        pass
+
+
 def run_worker_loop(
     dispatch: Dict[int, Dispatcher],
     req_q,
@@ -303,6 +366,7 @@ def run_worker_loop(
     """Serialize all requests on a single event loop. Handlers may be sync or
     return a coroutine; coroutines are awaited on the worker's asyncio loop.
     """
+    _enable_faulthandler()
     # pdeathsig is the authoritative parent-death signal on Linux. Only fall
     # back to the portable polling watchdog when the kernel hook is
     # unavailable (macOS, Windows) or failed to arm — that watchdog has no
@@ -504,6 +568,11 @@ class SubprocessSession:
         included in init-failure messages so callers can tell a silent
         ``os._exit(0)`` apart from a timeout where the child is still
         running.
+
+        Negative exit codes are decoded into the killing signal's name
+        (``exitcode=-9 (SIGKILL — likely OOM/docker kill)``) so the most
+        common production failure shapes don't require POSIX trivia to
+        read the log line.
         """
         try:
             pid = self._proc.pid
@@ -517,7 +586,7 @@ class SubprocessSession:
             alive = self._proc.is_alive()
         except Exception:
             alive = None
-        return f"pid={pid} exitcode={exitcode} alive={alive}"
+        return f"pid={pid} exitcode={_describe_exitcode(exitcode)} alive={alive}"
 
     def _init_failure_message(self, reason: str) -> str:
         return f"Subprocess init {reason} after {self._init_timeout}s ({self._init_diagnostics()})"

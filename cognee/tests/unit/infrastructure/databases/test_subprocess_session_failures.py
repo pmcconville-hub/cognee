@@ -22,6 +22,7 @@ from cognee_db_workers.harness import (
     Response,
     SubprocessSession,
     SubprocessTransportError,
+    _describe_exitcode,
     run_worker_loop,
     spawn_without_main,
 )
@@ -124,6 +125,17 @@ def _put_error_then_die_worker(req_q, resp_q):
     # ``Queue`` feeder thread's flush against process death. Exercises
     # the post-death drain path in ``wait_for_ready``.
     resp_q.put(Response(error="init-side boom"))
+
+
+def _signal_killed_worker(req_q, resp_q):
+    # Send ourselves SIGTERM before READY to exercise the signal-decoding
+    # path in ``_describe_exitcode``. We use SIGTERM rather than SIGKILL so
+    # the negative exitcode is portable (SIGKILL=-9 on Linux but the test
+    # body inspects whichever signal name appears — see assertions below).
+    import os as _os
+    import signal as _signal
+
+    _os.kill(_os.getpid(), _signal.SIGTERM)
 
 
 def _wait_for_worker_exit(session, timeout: float = 5.0) -> None:
@@ -363,6 +375,58 @@ def test_pdeathsig_arms_and_skips_polling_watchdog_on_linux():
         "run_worker_loop must gate the polling watchdog behind pdeathsig success — "
         "otherwise the PID-1 race in the polling watchdog can fire in Linux containers"
     )
+
+
+def test_describe_exitcode_decodes_signals():
+    """Negative exitcodes are decoded into signal names with a short hint
+    so production failure modes (OOM kills, segfaults) are readable in one
+    log line. Unknown / non-negative codes pass through unchanged.
+    """
+    import signal as _signal
+
+    # Round-trip the most common signals. Use the live ``signal.Signals``
+    # enum rather than hard-coded numbers so the test is portable across
+    # platforms where signal numbering differs.
+    sigterm = _describe_exitcode(-int(_signal.SIGTERM))
+    assert "SIGTERM" in sigterm and str(-int(_signal.SIGTERM)) in sigterm
+
+    if hasattr(_signal, "SIGKILL"):
+        sigkill = _describe_exitcode(-int(_signal.SIGKILL))
+        assert "SIGKILL" in sigkill
+        assert "OOM" in sigkill, (
+            "SIGKILL should be annotated with the most common cause in production"
+        )
+
+    # Non-signal cases pass through as plain strings.
+    assert _describe_exitcode(None) == "None"
+    assert _describe_exitcode(0) == "0"
+    assert _describe_exitcode(1) == "1"
+    # An out-of-range negative code (no matching ``signal.Signals`` member)
+    # must NOT raise and must NOT pretend to know what it is.
+    assert _describe_exitcode(-999) == "-999"
+
+
+def test_init_signal_killed_worker_surfaces_signal_name():
+    """End-to-end: a worker that dies to SIGTERM before READY surfaces
+    ``exitcode=-15 (SIGTERM …)`` in the error message. Regression guard
+    against the signal-decoding pipeline (faulthandler + ``_describe_exitcode``)
+    silently coming undone.
+    """
+    import signal as _signal
+
+    ctx = mp.get_context("spawn")
+    req_q = ctx.Queue()
+    resp_q = ctx.Queue()
+    proc = ctx.Process(target=_signal_killed_worker, args=(req_q, resp_q), daemon=True)
+    with spawn_without_main():
+        proc.start()
+    session = SubprocessSession(proc, req_q, resp_q, init_timeout=10.0)
+    with pytest.raises(SubprocessTransportError, match="exited before signalling ready") as excinfo:
+        session.wait_for_ready()
+    msg = str(excinfo.value)
+    expected_code = -int(_signal.SIGTERM)
+    assert f"exitcode={expected_code}" in msg, msg
+    assert "SIGTERM" in msg, f"signal name not decoded into diagnostic: {msg}"
 
 
 def test_call_timeout_on_hung_worker():
