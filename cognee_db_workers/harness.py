@@ -501,10 +501,33 @@ class SubprocessSession:
         return f"pid={pid} exitcode={exitcode} alive={alive}"
 
     def _init_failure_message(self, reason: str) -> str:
-        return (
-            f"Subprocess init {reason} after {self._init_timeout}s "
-            f"({self._init_diagnostics()})"
-        )
+        return f"Subprocess init {reason} after {self._init_timeout}s ({self._init_diagnostics()})"
+
+    # Total time we'll wait for the producer-side feeder thread's bytes to
+    # cross the pipe after the worker exits. Long enough to absorb scheduler
+    # jitter under load; short enough that an empty queue resolves to the
+    # "exited before signalling ready" message quickly.
+    _POST_DEATH_DRAIN_TIMEOUT = 0.5
+    _POST_DEATH_DRAIN_POLL = 0.02
+
+    def _drain_response_after_death(self) -> Optional[Response]:
+        """Try to read a Response that the worker queued just before exiting.
+
+        See the caller's comment for the race this addresses: the producer's
+        feeder thread may not have pushed pickled bytes onto the pipe before
+        the worker exited, so ``get_nowait()`` immediately after observing
+        ``is_alive() == False`` can return ``Empty`` even when data is in
+        flight. Poll for a short bounded window so legitimate worker-side
+        errors aren't lost.
+        """
+        deadline = time.monotonic() + self._POST_DEATH_DRAIN_TIMEOUT
+        while True:
+            try:
+                return self._resp_q.get_nowait()
+            except std_queue.Empty:
+                if time.monotonic() >= deadline:
+                    return None
+                time.sleep(self._POST_DEATH_DRAIN_POLL)
 
     def wait_for_ready(self) -> None:
         # Poll the response queue in short slices so we notice if the child
@@ -529,11 +552,21 @@ class SubprocessSession:
                 if not self._proc.is_alive():
                     # Drain anything the child managed to queue before dying
                     # (a Response with .error is common when init raised).
-                    try:
-                        resp = self._resp_q.get_nowait()
+                    #
+                    # ``multiprocessing.Queue`` uses a background feeder
+                    # thread in the producer to push pickled bytes from an
+                    # in-memory buffer onto the pipe — those bytes may not
+                    # have crossed yet when the worker exits, so a single
+                    # ``get_nowait()`` races the flush and would drop the
+                    # error the child intended to send. Poll for a short
+                    # bounded window (sub-second) before giving up. We
+                    # cannot use ``proc.join()`` to force a flush: the
+                    # feeder thread lives in the *worker* process and is
+                    # already gone once the worker has exited.
+                    drained = self._drain_response_after_death()
+                    if drained is not None:
+                        resp = drained
                         break
-                    except std_queue.Empty:
-                        pass
                     self._terminate()
                     self._closed = True
                     raise SubprocessTransportError(
