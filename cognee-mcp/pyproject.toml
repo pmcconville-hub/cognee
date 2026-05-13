@@ -46,6 +46,18 @@ postgres-binary = [
 [tool.hatch.metadata]
 allow-direct-references = true
 
+[tool.uv]
+# onnxruntime is pulled in transitively via cognee[docs] -> unstructured.
+# 1.24.x dropped cp310 wheels (the MCP CI step uses Python 3.10), and
+# cp314 wheels start at 1.24.1. cognee's own pyproject applies the same
+# split inside its [fastembed] extra, but cognee-mcp doesn't pull that
+# extra, so we must mirror the constraint here to keep `uv lock --upgrade`
+# from picking a 1.24.x for python<3.14.
+constraint-dependencies = [
+    "onnxruntime<=1.23.2 ; python_version < '3.14'",
+    "onnxruntime>=1.24.1 ; python_version >= '3.14'",
+]
+
 [project.scripts]
 cognee = "src:main"
 cognee-mcp = "src:main_mcp"
