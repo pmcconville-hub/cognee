@@ -120,26 +120,28 @@ def log(msg: str) -> None:
     print(f"[{ts}] {msg}", flush=True)
 
 
-def add_file(base_url: str, api_key: str, file_index: int) -> float:
-    text, _ = generate_document(num_paragraphs=random.randint(2, 5))
-    files = [
-        ("data", (f"document_{file_index}.txt", io.BytesIO(text.encode("utf-8")), "text/plain"))
-    ]
-    form_data = {"datasetName": DATASET_NAME}
-    headers = {"X-Api-Key": api_key}
+def add_files_batch(base_url: str, api_key: str, count: int) -> float:
+    log(f"  Generating {count} documents...")
+    files = []
+    for i in range(1, count + 1):
+        text, _ = generate_document(num_paragraphs=random.randint(2, 5))
+        files.append(
+            ("data", (f"document_{i}.txt", io.BytesIO(text.encode("utf-8")), "text/plain"))
+        )
+    log(f"  Uploading {count} files in a single request...")
 
     start = time.time()
     resp = requests.post(
         f"{base_url}/api/v1/add",
-        data=form_data,
+        data={"datasetName": DATASET_NAME},
         files=files,
-        headers=headers,
-        timeout=600,
+        headers={"X-Api-Key": api_key},
+        timeout=1800,
     )
     elapsed = time.time() - start
 
     if resp.status_code != 200:
-        log(f"  ERROR file {file_index}: {resp.status_code} - {resp.text[:200]}")
+        log(f"  ERROR: {resp.status_code} - {resp.text[:300]}")
     return elapsed
 
 
@@ -197,26 +199,11 @@ def main() -> None:
         wait_for_server(f"{base_url}/health")
         log("Server is ready")
 
-        log(f"=== Adding {NUM_FILES} files to dataset '{DATASET_NAME}' ===")
-        add_times = []
-        total_add_start = time.time()
-
-        for i in range(1, NUM_FILES + 1):
-            elapsed = add_file(base_url, api_key, i)
-            add_times.append(elapsed)
-            if i % 10 == 0 or i == 1:
-                avg_so_far = sum(add_times) / len(add_times)
-                log(f"  Added {i}/{NUM_FILES} files | last={elapsed:.2f}s avg={avg_so_far:.2f}s")
-
-        total_add_time = time.time() - total_add_start
-        avg_add = sum(add_times) / len(add_times)
-        min_add = min(add_times)
-        max_add = max(add_times)
-
+        log(f"=== Adding {NUM_FILES} files to dataset '{DATASET_NAME}' (single request) ===")
+        total_add_time = add_files_batch(base_url, api_key, NUM_FILES)
         log("=== Add phase complete ===")
         log(f"  Total:   {total_add_time:.1f}s")
-        log(f"  Average: {avg_add:.2f}s per file")
-        log(f"  Min:     {min_add:.2f}s  Max: {max_add:.2f}s")
+        log(f"  Average: {total_add_time / NUM_FILES:.3f}s per file")
 
         log(f"=== Running cognify on dataset '{DATASET_NAME}' ===")
         cognify_time = cognify(base_url, api_key)
@@ -225,7 +212,9 @@ def main() -> None:
 
         log("=== Summary ===")
         log(f"  Files added:     {NUM_FILES}")
-        log(f"  Add total time:  {total_add_time:.1f}s ({avg_add:.2f}s avg per file)")
+        log(
+            f"  Add total time:  {total_add_time:.1f}s ({total_add_time / NUM_FILES:.3f}s avg per file)"
+        )
         log(f"  Cognify time:    {cognify_time:.1f}s")
         log(f"  Total time:      {total_add_time + cognify_time:.1f}s")
 
