@@ -49,7 +49,7 @@ class CognifyPayloadDTO(InDTO):
     chunk_size: Optional[int] = Field(
         default=None,
         description="Maximum tokens per chunk. Defaults to automatic model-based sizing.",
-        examples=[512, 1024, 2048],
+        examples=[4096, 8192],
     )
     ontology_key: Optional[List[str]] = Field(
         default=None,
@@ -59,7 +59,7 @@ class CognifyPayloadDTO(InDTO):
     chunks_per_batch: Optional[int] = Field(
         default=None,
         description="Number of chunks to process per task batch in Cognify (overrides default).",
-        examples=[10, 20, 50, 100],
+        examples=[36, 50, 100],
     )
 
 
