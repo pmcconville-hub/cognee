@@ -61,6 +61,11 @@ class CognifyPayloadDTO(InDTO):
         description="Number of chunks to process per task batch in Cognify (overrides default).",
         examples=[36, 50, 100],
     )
+    data_per_batch: Optional[int] = Field(
+        default=20,
+        description="Maximum number of data items to process concurrently within a dataset.",
+        examples=[20, 30, 50],
+    )
 
 
 def get_cognify_router() -> APIRouter:
@@ -101,6 +106,7 @@ def get_cognify_router() -> APIRouter:
         - **chunk_size** (Optional[int]): Maximum tokens per chunk. If omitted, Cognee chooses
           a size from the configured LLM and embedding limits.
         - **ontology_key** (Optional[List[str]]): Reference to one or more previously uploaded ontology files to use for knowledge graph construction.
+        - **data_per_batch** (Optional[int]): Maximum number of data items to process concurrently within a dataset. Defaults to 20.
 
         ## Response
         - **Blocking execution**: Complete pipeline run information with entity counts, processing duration, and success/failure status
@@ -218,6 +224,7 @@ def get_cognify_router() -> APIRouter:
                 custom_prompt=custom_prompt,
                 chunk_size=payload.chunk_size,
                 chunks_per_batch=payload.chunks_per_batch,
+                data_per_batch=payload.data_per_batch,
             )
 
             # Persist schema and prompt to DatasetConfiguration for first dataset

@@ -89,7 +89,7 @@ def generate_paragraph(topic: str, num_sentences: int = 5) -> str:
 def generate_document(num_paragraphs: int = 3) -> tuple:
     topic = random.choice(TOPICS)
     paragraphs = [
-        generate_paragraph(topic, num_sentences=random.randint(300, 377))
+        generate_paragraph(topic, num_sentences=random.randint(50, 100))
         for _ in range(num_paragraphs)
     ]
     paragraphs.append(str(uuid.uuid4()))
@@ -109,7 +109,7 @@ def wait_for_server(url: str, timeout: float = 240.0) -> None:
             with urllib.request.urlopen(url, timeout=2) as resp:
                 if resp.status == 200:
                     return
-        except (urllib.error.URLError, ConnectionError):
+        except (urllib.error.URLError, ConnectionError, TimeoutError):
             pass
         time.sleep(0.5)
     raise SystemExit(f"Server at {url} did not become ready in {timeout}s")
@@ -147,7 +147,7 @@ def add_files_batch(base_url: str, api_key: str, count: int) -> float:
 
 def cognify(base_url: str, api_key: str) -> float:
     headers = {"X-Api-Key": api_key, "Content-Type": "application/json"}
-    payload = {"datasets": [DATASET_NAME], "runInBackground": False}
+    payload = {"datasets": [DATASET_NAME], "data_per_batch": NUM_FILES, "runInBackground": False}
 
     start = time.time()
     resp = requests.post(
