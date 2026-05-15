@@ -289,7 +289,6 @@ jobs:
       relational-db-migration-tests,
       docker-compose-test,
       docker-ci-test,
-      integration-tests,
       slow-e2e-tests,
     ]
     uses: ./.github/workflows/test_ollama.yml
