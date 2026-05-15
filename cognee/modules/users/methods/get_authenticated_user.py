@@ -51,10 +51,7 @@ def _resolve_auth_posture() -> tuple[bool, bool, str]:
                 "ENABLE_BACKEND_ACCESS_CONTROL=false."
             )
             require_authentication = True
-            reason = (
-                "forced on by multi-tenant mode "
-                "(REQUIRE_AUTHENTICATION=false was ignored)"
-            )
+            reason = "forced on by multi-tenant mode (REQUIRE_AUTHENTICATION=false was ignored)"
         else:
             reason = "explicit REQUIRE_AUTHENTICATION"
     else:
@@ -68,9 +65,7 @@ def _resolve_auth_posture() -> tuple[bool, bool, str]:
     return require_authentication, enable_access_control, reason
 
 
-REQUIRE_AUTHENTICATION, ENABLE_BACKEND_ACCESS_CONTROL, _AUTH_REASON = (
-    _resolve_auth_posture()
-)
+REQUIRE_AUTHENTICATION, ENABLE_BACKEND_ACCESS_CONTROL, _AUTH_REASON = _resolve_auth_posture()
 
 logger.info(
     "auth posture: authentication=%s, multi_tenant=%s (%s)",
