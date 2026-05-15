@@ -49,8 +49,6 @@ async def search(
     skills: Optional[List[Union[str, Skill]]] = None,
     tools: Optional[List[str]] = None,
     max_iter: Optional[int] = None,
-    skills_auto_retrieve: Optional[bool] = None,
-    skills_top_k: Optional[int] = None,
 ) -> List[SearchResult]:
     if neighborhood_depth is not None and (
         not isinstance(neighborhood_depth, int) or neighborhood_depth < 1
@@ -70,11 +68,6 @@ async def search(
         raise CogneeValidationError(
             message="max_iter must be a positive integer.",
             name="InvalidMaxIter",
-        )
-    if skills_top_k is not None and (not isinstance(skills_top_k, int) or skills_top_k < 1):
-        raise CogneeValidationError(
-            message="skills_top_k must be a positive integer.",
-            name="InvalidSkillsTopK",
         )
     """
     Search and query the knowledge graph for insights, information, and connections.
@@ -172,8 +165,6 @@ async def search(
         skills: Explicit skill names or Skill objects to load into the agentic retriever.
         tools: Optional whitelist of tool names available to the agentic retriever.
         max_iter: Maximum number of agentic tool-call iterations before forcing a final answer.
-        skills_auto_retrieve: If True, vector-retrieve relevant skills for the query.
-        skills_top_k: Number of candidate skills to auto-retrieve when skills_auto_retrieve is enabled.
 
     Returns:
         list: Search results in format determined by query_type:
@@ -223,15 +214,10 @@ async def search(
         - GRAPH_DATABASE_PROVIDER: Must match what was used during cognify
 
     """
-    # Skills, tools, and the agentic loop knobs activate the AgenticRetriever
-    # inside the search type factory. They live in retriever_specific_config
-    # so the rest of the pipeline does not need to know about them.
     agentic_overrides = {
         "skills": skills,
         "tools": tools,
         "max_iter": max_iter,
-        "skills_auto_retrieve": skills_auto_retrieve,
-        "skills_top_k": skills_top_k,
     }
 
     # Route to remote instance if connected via serve()
@@ -260,6 +246,14 @@ async def search(
         # We use lists from now on for datasets
         if isinstance(datasets, UUID) or isinstance(datasets, str):
             datasets = [datasets]
+
+        if (
+            skills is not None or tools is not None
+        ) and query_type is not SearchType.AGENTIC_COMPLETION:
+            raise CogneeValidationError(
+                message="skills/tools require query_type=SearchType.AGENTIC_COMPLETION.",
+                name="InvalidAgenticSearchConfig",
+            )
 
         allowed_node_name_operators = {"AND", "OR"}
         normalized_node_name_filter_operator = (node_name_filter_operator or "").strip().upper()
@@ -291,6 +285,16 @@ async def search(
             datasets = [dataset.id for dataset in datasets]
             if not datasets:
                 raise DatasetNotFoundError(message="No datasets found.")
+
+        if query_type is SearchType.AGENTIC_COMPLETION:
+            active_dataset_refs = dataset_ids if dataset_ids else datasets
+            if isinstance(active_dataset_refs, UUID):
+                active_dataset_refs = [active_dataset_refs]
+            if not active_dataset_refs or len(active_dataset_refs) != 1:
+                raise CogneeValidationError(
+                    message="Agentic skill search requires exactly one explicit dataset.",
+                    name="InvalidAgenticDatasetScope",
+                )
 
         if any(v is not None for v in agentic_overrides.values()):
             retriever_specific_config = dict(retriever_specific_config or {})

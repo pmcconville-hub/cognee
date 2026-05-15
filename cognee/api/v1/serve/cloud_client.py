@@ -63,6 +63,8 @@ class CloudClient:
             form.add_field("chunk_size", str(kwargs["chunk_size"]))
         if kwargs.get("chunks_per_batch") is not None:
             form.add_field("chunks_per_batch", str(kwargs["chunks_per_batch"]))
+        if kwargs.get("content_type") is not None:
+            form.add_field("content_type", str(kwargs["content_type"]))
 
         # Handle data — string or file-like objects
         if isinstance(data, str):
@@ -99,9 +101,7 @@ class CloudClient:
         entry,
         dataset_name: str = "main_dataset",
         session_id: Optional[str] = None,
-        improve: bool = False,
-        improve_min_runs: int = 3,
-        improve_score_threshold: float = 0.5,
+        skill_improvement: Optional[dict] = None,
     ) -> dict:
         """POST /api/v1/remember/entry — store a typed MemoryEntry.
 
@@ -116,9 +116,7 @@ class CloudClient:
             "entry": entry_dump,
             "dataset_name": dataset_name,
             "session_id": session_id,
-            "improve": improve,
-            "improve_min_runs": improve_min_runs,
-            "improve_score_threshold": improve_score_threshold,
+            "skill_improvement": skill_improvement,
         }
 
         async with session.post(
@@ -286,10 +284,6 @@ class CloudClient:
             payload["tools"] = kwargs["tools"]
         if kwargs.get("max_iter") is not None:
             payload["maxIter"] = kwargs["max_iter"]
-        if kwargs.get("skills_auto_retrieve") is not None:
-            payload["skillsAutoRetrieve"] = kwargs["skills_auto_retrieve"]
-        if kwargs.get("skills_top_k") is not None:
-            payload["skillsTopK"] = kwargs["skills_top_k"]
 
         async with session.post(
             f"{self.service_url}/api/v1/search",

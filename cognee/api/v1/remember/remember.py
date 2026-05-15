@@ -1,7 +1,7 @@
 import asyncio
 import time
 from uuid import UUID
-from typing import Union, BinaryIO, List, Optional, Any
+from typing import Union, BinaryIO, List, Optional, Any, Literal
 
 try:
     from typing import Unpack
@@ -63,16 +63,8 @@ class RememberKwargs(TypedDict, total=False):
     user: object
     vector_db_config: dict
     graph_db_config: dict
-    # SKILL.md ingest only: run LLM enrichment + materialize task patterns
-    # after parsing. Defaults to True and is ignored for non-skill sources.
-    enrich: bool
-    # Skill flows only: after ingesting SKILL.md files or recording a
-    # SkillRunEntry, run improve_failing_skills when enough low-score
-    # SkillRun signal exists. Ignored for regular data sources.
-    improve: bool
-    # Optional tuning for skill improvement when ``improve=True``.
-    improve_min_runs: int
-    improve_score_threshold: float
+    content_type: Literal["skills"]
+    skill_improvement: dict[str, Any]
 
 
 # Kwarg routing: which RememberKwargs go to add(), cognify(), or both.
@@ -176,9 +168,7 @@ async def _remember_entry(
     dataset_name: str,
     session_id: Optional[str],
     user,
-    improve: bool = False,
-    improve_min_runs: int = 3,
-    improve_score_threshold: float = 0.5,
+    skill_improvement: Optional[dict[str, Any]] = None,
 ) -> "RememberResult":
     """Top-level dispatcher for typed MemoryEntry payloads.
 
@@ -193,9 +183,7 @@ async def _remember_entry(
             entry,
             dataset_name=dataset_name,
             session_id=session_id,
-            improve=improve,
-            improve_min_runs=improve_min_runs,
-            improve_score_threshold=improve_score_threshold,
+            skill_improvement=skill_improvement,
         )
         # Reconstruct a RememberResult from the server's response
         result = RememberResult(
@@ -215,9 +203,7 @@ async def _remember_entry(
         dataset_name=dataset_name,
         session_id=session_id,
         user=user,
-        improve=improve,
-        improve_min_runs=improve_min_runs,
-        improve_score_threshold=improve_score_threshold,
+        skill_improvement=skill_improvement,
     )
 
 
@@ -227,9 +213,7 @@ async def _dispatch_session_entry(
     dataset_name: str,
     session_id: Optional[str],
     user,
-    improve: bool = False,
-    improve_min_runs: int = 3,
-    improve_score_threshold: float = 0.5,
+    skill_improvement: Optional[dict[str, Any]] = None,
 ) -> "RememberResult":
     """Route a typed memory entry to the right SessionManager method.
 
@@ -241,14 +225,11 @@ async def _dispatch_session_entry(
     if isinstance(entry, SkillRunEntry):
         from cognee.modules.tools.skill_runs import remember_skill_run_entry
 
-        run, dataset, applied_amendments = await remember_skill_run_entry(
+        run, dataset = await remember_skill_run_entry(
             entry,
             dataset_name=dataset_name,
             session_id=session_id,
             user=user,
-            improve=improve,
-            improve_min_runs=improve_min_runs,
-            improve_score_threshold=improve_score_threshold,
         )
 
         result = RememberResult(
@@ -266,13 +247,25 @@ async def _dispatch_session_entry(
                 "kind": "skill_run",
                 "run_id": run.run_id,
                 "selected_skill_id": run.selected_skill_id,
+                "selected_skill_name": run.selected_skill_name,
                 "success_score": run.success_score,
             }
         ]
-        if applied_amendments:
-            result.items.extend(
-                {"kind": "amendment", "skill_name": a.get("skill_name")} for a in applied_amendments
-            )
+        if skill_improvement is not None:
+            from cognee.modules.memify.skill_improvement import improve_skill_from_config
+
+            config = dict(skill_improvement)
+            config.setdefault("skill_name", run.selected_skill_name or entry.selected_skill_id)
+            proposal = await improve_skill_from_config(config, dataset=dataset, user=user)
+            if proposal is not None:
+                result.items.append(
+                    {
+                        "kind": "skill_improvement_proposal",
+                        "proposal_id": proposal.proposal_id,
+                        "skill_name": proposal.skill_name,
+                        "status": proposal.status,
+                    }
+                )
         return result
 
     from cognee.infrastructure.session.get_session_manager import get_session_manager
@@ -647,6 +640,12 @@ async def remember(
             Only used when ``self_improvement=True``. When provided,
             ``improve()`` will also copy recent graph relationships
             into these sessions for fast retrieval.
+        content_type: Set to ``"skills"`` to explicitly ingest SKILL.md
+            files as dataset-scoped Skill nodes. ``remember()`` does not
+            auto-detect skill paths.
+        skill_improvement: Internal skill-improvement control dict used with
+            ``SkillRunEntry`` or ``content_type="skills"``. ``apply=True``
+            requires an existing ``proposal_id``.
         **kwargs: Additional options -- see ``RememberKwargs``.
 
     Returns:
@@ -680,9 +679,7 @@ async def remember(
             dataset_name=dataset_name,
             session_id=session_id,
             user=kwargs.get("user"),
-            improve=bool(kwargs.get("improve", False)),
-            improve_min_runs=int(kwargs.get("improve_min_runs", 3)),
-            improve_score_threshold=float(kwargs.get("improve_score_threshold", 0.5)),
+            skill_improvement=kwargs.get("skill_improvement"),
         )
 
     data_size = _estimate_data_size(data)
@@ -761,21 +758,8 @@ async def _remember_inner(
     # writes, even when the API server was never started.
     await _ensure_migrations_run()
 
-    # Auto-dispatch: capability package files are persisted as first-class
-    # profile/skill DataPoints rather than run through chunk+extract.
-    from cognee.modules.tools import (
-        add_profiles,
-        add_skills,
-        looks_like_profile_source,
-        looks_like_skill_source,
-    )
-
-    # Pop skill-ingest kwargs before the regular add/cognify path so callers
-    # can pass them safely even when the input is not a skill source.
-    enrich = bool(kwargs.pop("enrich", True))
-    improve = bool(kwargs.pop("improve", False))
-    improve_min_runs = int(kwargs.pop("improve_min_runs", 3))
-    improve_score_threshold = float(kwargs.pop("improve_score_threshold", 0.5))
+    content_type = kwargs.pop("content_type", None)
+    skill_improvement = kwargs.pop("skill_improvement", None)
 
     def _requested_node_set(default: str) -> str:
         requested_node_set = kwargs.get("node_set") or [default]
@@ -785,48 +769,16 @@ async def _remember_inner(
             return requested_node_set[0]
         return default
 
-    if looks_like_profile_source(data):
+    if content_type not in (None, "skills"):
+        raise ValueError("Unsupported remember content_type. Supported values: 'skills'.")
+    if skill_improvement is not None and content_type != "skills":
+        raise ValueError(
+            "skill_improvement is supported only for SkillRunEntry or content_type='skills'."
+        )
+
+    if content_type == "skills":
         from cognee.modules.engine.operations.setup import setup
-
-        await setup()
-
-        user = kwargs.get("user")
-        dataset_id = kwargs.get("dataset_id")
-        dataset_ref = dataset_id or dataset_name
-        user, authorized_datasets = await resolve_authorized_user_datasets(dataset_ref, user)
-        dataset = authorized_datasets[0]
-        profiles_node_set = _requested_node_set("profiles")
-
-        package = await add_profiles(
-            data,
-            node_set=profiles_node_set,
-            user=user,
-            dataset=dataset,
-        )
-
-        result = RememberResult(
-            status="completed",
-            dataset_name=dataset.name,
-            dataset_id=str(dataset.id),
-            session_ids=None,
-        )
-        result.elapsed_seconds = time.monotonic() - result._started_at
-        result.items_processed = len(package.items)
-        result.items = [
-            {"name": agent.name, "kind": "agent_profile", "declared_tools": agent.declared_tools}
-            for agent in package.agents
-        ]
-        result.items.extend(
-            {"name": memory.name, "kind": "memory_profile"} for memory in package.memories
-        )
-        result.items.extend(
-            {"name": skill.name, "kind": "skill", "declared_tools": skill.declared_tools}
-            for skill in package.skills
-        )
-        return result
-
-    if looks_like_skill_source(data):
-        from cognee.modules.engine.operations.setup import setup
+        from cognee.modules.tools import add_skills
 
         await setup()
 
@@ -840,27 +792,10 @@ async def _remember_inner(
 
         skills = await add_skills(
             data,
-            enrich=enrich,
             node_set=skills_node_set,
             user=user,
             dataset=dataset,
         )
-        applied_amendments: list = []
-        if improve:
-            # Run the memify skill-improvement task once. It'll no-op if
-            # no skill has enough low-score SkillRun signal yet.
-            from cognee.modules.memify.skill_improvement import (
-                improve_failing_skills,
-            )
-
-            try:
-                applied_amendments = await improve_failing_skills(
-                    node_set=skills_node_set,
-                    min_runs=improve_min_runs,
-                    score_threshold=improve_score_threshold,
-                )
-            except Exception as exc:
-                logger.warning("improve_failing_skills failed: %s", exc)
         result = RememberResult(
             status="completed",
             dataset_name=dataset.name,
@@ -872,10 +807,21 @@ async def _remember_inner(
         result.items = [
             {"name": s.name, "kind": "skill", "declared_tools": s.declared_tools} for s in skills
         ]
-        if applied_amendments:
-            result.items.extend(
-                {"kind": "amendment", "skill_name": a.get("skill_name")} for a in applied_amendments
+        if skill_improvement is not None:
+            from cognee.modules.memify.skill_improvement import improve_skill_from_config
+
+            proposal = await improve_skill_from_config(
+                skill_improvement, dataset=dataset, user=user
             )
+            if proposal is not None:
+                result.items.append(
+                    {
+                        "kind": "skill_improvement_proposal",
+                        "proposal_id": proposal.proposal_id,
+                        "skill_name": proposal.skill_name,
+                        "status": proposal.status,
+                    }
+                )
         return result
 
     from cognee.api.v1.add import add

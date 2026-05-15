@@ -14,15 +14,6 @@ from cognee.tests.utils.get_contains_edge_text import get_contains_edge_text
 logger = get_logger()
 
 
-def _get_index_fields(data_point_type: type[DataPoint]) -> list[str]:
-    metadata = DataPoint._get_metadata_default(data_point_type.model_fields.get("metadata"))
-    if metadata is None:
-        return []
-
-    index_fields = metadata.get("index_fields", [])
-    return list(index_fields) if index_fields else []
-
-
 async def legacy_delete(data: Data, mode: str = "soft"):
     """Delete a single document by its content hash."""
 
@@ -37,7 +28,8 @@ async def legacy_delete(data: Data, mode: str = "soft"):
     vector_collections = []
 
     for subclass in subclasses:
-        for field_name in _get_index_fields(subclass):
+        index_fields = subclass.model_fields["metadata"].default.get("index_fields", [])
+        for field_name in index_fields:
             vector_collections.append(f"{subclass.__name__}_{field_name}")
 
     # If no collections found, use default collections

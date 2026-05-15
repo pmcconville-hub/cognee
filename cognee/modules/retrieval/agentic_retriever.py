@@ -12,8 +12,9 @@ load_skill tool to fetch a body on demand (progressive disclosure).
 """
 
 import time
+from types import SimpleNamespace
 from typing import Any, List, Optional, Sequence, Union
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from pydantic import BaseModel, Field
 
@@ -35,6 +36,7 @@ from cognee.shared.logging_utils import get_logger
 
 
 logger = get_logger("AgenticRetriever")
+MAX_TOOL_OUTPUT_CHARS = 8_000
 
 
 class ToolCall(BaseModel):
@@ -81,10 +83,9 @@ class AgenticRetriever(GraphCompletionRetriever):
         skills: Optional[Sequence[Union[str, Skill]]] = None,
         tools: Optional[List[str]] = None,
         user: Optional[User] = None,
+        dataset=None,
         dataset_id: Optional[UUID] = None,
         max_iter: int = 6,
-        skills_auto_retrieve: bool = False,
-        skills_top_k: int = 3,
         agentic_system_prompt_path: str = "agentic_system.txt",
         agentic_user_prompt_path: str = "agentic_user.txt",
         **kwargs,
@@ -95,10 +96,11 @@ class AgenticRetriever(GraphCompletionRetriever):
         self.explicit_skills = list(skills) if skills else []
         self.tool_filter = tools
         self.user = user
-        self.dataset_id = dataset_id
+        self.dataset = dataset
+        self.dataset_id = dataset_id or getattr(dataset, "id", None)
+        if self.dataset_id is None:
+            raise ValueError("AgenticRetriever requires one explicit dataset for skill lookup.")
         self.max_iter = max_iter
-        self.skills_auto_retrieve = skills_auto_retrieve
-        self.skills_top_k = skills_top_k
         self.agentic_system_prompt_path = agentic_system_prompt_path
         self.agentic_user_prompt_path = agentic_user_prompt_path
         self._cached_context: Optional[str] = None
@@ -120,12 +122,9 @@ class AgenticRetriever(GraphCompletionRetriever):
         """
         triplets = await super().get_retrieved_objects(query=query, query_batch=query_batch)
 
-        auto_query = query if self.skills_auto_retrieve else None
         skills = await resolve_skills(
             self.explicit_skills,
             dataset_id=self.dataset_id,
-            auto_retrieve_query=auto_query,
-            top_k=self.skills_top_k,
         )
         tools = await self._resolve_active_tools(skills)
 
@@ -224,6 +223,9 @@ class AgenticRetriever(GraphCompletionRetriever):
                         error_type=type(exc).__name__,
                         error_message=str(exc),
                         tool_trace=tool_trace,
+                        user=self.user,
+                        dataset=self.dataset,
+                        session_id=self.session_id,
                     )
                 raise
         finally:
@@ -234,8 +236,7 @@ class AgenticRetriever(GraphCompletionRetriever):
 
         # Record a SkillRun only for skills the agent actually opened via
         # load_skill — not for every skill in the prefilter catalog.
-        # ``improve_failing_skills`` consumes only low-scored runs, so
-        # ungraded agentic executions use the neutral default score until
+        # Ungraded agentic executions use the neutral default score until
         # explicit feedback or an evaluator supplies one.
         skills_to_record = [s for s in skills if s.name in opened_skills]
         if skills_to_record:
@@ -246,6 +247,9 @@ class AgenticRetriever(GraphCompletionRetriever):
                 started_at_ms=started_at_ms,
                 latency_ms=latency_ms,
                 tool_trace=tool_trace,
+                user=self.user,
+                dataset=self.dataset,
+                session_id=self.session_id,
             )
 
         await self._store_session_qa(
@@ -269,31 +273,52 @@ class AgenticRetriever(GraphCompletionRetriever):
         error_type: str = "",
         error_message: str = "",
         tool_trace: Optional[List[SkillRunToolCall]] = None,
+        user=None,
+        dataset=None,
+        session_id: Optional[str] = None,
     ) -> None:
         """Persist one SkillRun node per active skill after a retrieval call."""
+        from cognee.modules.engine.models import NodeSet
         from cognee.modules.engine.models.SkillRun import SkillRun, UNSCORED_SKILL_RUN_SCORE
+        from cognee.modules.engine.utils.generate_node_id import generate_node_id
+        from cognee.modules.pipelines.models import PipelineContext
         from cognee.tasks.storage.add_data_points import add_data_points
 
         resolved_score = UNSCORED_SKILL_RUN_SCORE if success_score is None else success_score
         resolved_trace = list(tool_trace) if tool_trace else []
+        dataset_id = getattr(dataset, "id", None)
+        dataset_scope = [str(dataset_id)] if dataset_id is not None else []
         runs = [
             SkillRun(
-                run_id=f"agentic:{s.name}:{uuid4()}",
-                selected_skill_id=s.name,
+                run_id=f"agentic:{s.id}:{uuid4()}",
+                selected_skill_id=str(s.id),
+                selected_skill_name=s.name,
+                dataset_scope=dataset_scope,
                 task_text=task_text,
                 success_score=resolved_score,
                 result_summary=(result[:500] if isinstance(result, str) else ""),
-                session_id="agentic",
+                session_id=session_id or "agentic",
                 error_type=error_type,
                 error_message=error_message,
                 started_at_ms=started_at_ms,
                 latency_ms=latency_ms,
                 tool_trace=list(resolved_trace),
+                belongs_to_set=[NodeSet(id=generate_node_id("NodeSet:skills"), name="skills")],
             )
             for s in skills
         ]
+        ctx = None
+        if user is not None and dataset is not None and dataset_id is not None:
+            ctx = PipelineContext(
+                user=user,
+                dataset=dataset,
+                data_item=SimpleNamespace(
+                    id=uuid5(NAMESPACE_URL, f"cognee:skill-runs:{dataset_id}:{uuid4()}")
+                ),
+                pipeline_name="agentic_skill_runs_pipeline",
+            )
         try:
-            await add_data_points(runs)
+            await add_data_points(runs, ctx=ctx)
         except Exception as exc:
             logger.warning("Failed to record SkillRun(s) after agentic retrieval: %s", exc)
 
@@ -390,6 +415,8 @@ class AgenticRetriever(GraphCompletionRetriever):
 
             t0 = time.perf_counter()
             tool_result = await self._run_tool_safely(step.tool_call, tool_names)
+            if len(tool_result) > MAX_TOOL_OUTPUT_CHARS:
+                tool_result = tool_result[:MAX_TOOL_OUTPUT_CHARS] + "\n... [truncated]"
             duration_ms = int((time.perf_counter() - t0) * 1000)
             if tool_trace is not None:
                 tool_trace.append(

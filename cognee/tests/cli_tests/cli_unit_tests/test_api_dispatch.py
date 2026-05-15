@@ -68,18 +68,7 @@ class TestDispatchRouting:
 
     def test_supported_commands_match_dispatchers(self):
         """Ensure SUPPORTED_COMMANDS set matches the dispatcher dict keys."""
-        assert SUPPORTED_COMMANDS == {
-            "add",
-            "cognify",
-            "datasets",
-            "delete",
-            "forget",
-            "improve",
-            "memify",
-            "recall",
-            "remember",
-            "search",
-        }
+        assert SUPPORTED_COMMANDS == {"add", "cognify", "search", "memify", "datasets", "delete"}
 
 
 class TestUserIdHeader:

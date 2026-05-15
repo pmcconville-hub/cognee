@@ -20,10 +20,6 @@ from cognee.infrastructure.files.storage import get_file_storage
 from cognee.infrastructure.databases.graph.graph_db_interface import (
     GraphDBInterface,
 )
-from cognee.infrastructure.databases.graph.kuzu.defaults import (
-    DEFAULT_KUZU_BUFFER_POOL_SIZE,
-    DEFAULT_KUZU_MAX_DB_SIZE,
-)
 from cognee.infrastructure.engine import DataPoint
 from cognee.modules.storage.utils import JSONEncoder
 from cognee.modules.engine.utils.generate_timestamp_datapoint import date_to_int
@@ -38,6 +34,9 @@ from cognee.modules.observability.tracing import (
 )
 
 logger = get_logger()
+
+DEFAULT_KUZU_BUFFER_POOL_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB
+DEFAULT_KUZU_MAX_DB_SIZE = 4 * 1024 * 1024 * 1024  # 4 GB
 
 
 cache_config = get_cache_config()

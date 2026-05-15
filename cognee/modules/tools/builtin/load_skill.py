@@ -14,6 +14,8 @@ from cognee.modules.tools.errors import ToolInvocationError
 from cognee.modules.tools.registry import register_builtin_tool
 
 
+MAX_SKILL_BODY_CHARS = 12_000
+
 TOOL = Tool(
     name="load_skill",
     description=(
@@ -49,6 +51,8 @@ async def handler(args: Dict[str, Any], **_) -> str:
         opened.add(skill.name)
 
     body = skill.procedure or "(this skill has no procedure body)"
+    if len(body) > MAX_SKILL_BODY_CHARS:
+        body = body[:MAX_SKILL_BODY_CHARS] + "\n... [truncated]"
     return f"# Skill: {skill.name}\n{body}"
 
 

@@ -1,23 +1,11 @@
-"""Ingest SKILL.md files as Skill DataPoints into the knowledge graph.
+"""Explicit SKILL.md ingestion for the agentic-skills v1 scope."""
 
-Single entry point for all skill ingestion. Always uses the rich parser
-(content hash, resources, extra metadata). With ``enrich=True`` also runs
-the LLM enrichment pipeline (triggers, tags, instruction_summary,
-complexity, task_pattern_candidates) and materializes TaskPattern nodes.
-
-Re-ingesting an already-ingested skills folder is safe: each skill's
-``content_hash`` is compared against the graph, and only new or
-changed skills go through the persist path. Removed skills are
-deleted from both graph and vector stores, and every change gets a
-``SkillChangeEvent`` node for audit.
-
-Called directly from ``cognee.remember(path, enrich=...)``.
-"""
+from __future__ import annotations
 
 import os
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Dict, List, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from cognee.modules.engine.models import Skill
@@ -33,27 +21,16 @@ SKILL_SOURCE_ROOTS_ENV = "COGNEE_SKILL_SOURCE_ROOTS"
 
 
 def _configured_skill_source_roots() -> Tuple[Path, ...]:
-    """Return directories that are allowed to be probed for SKILL.md files."""
     roots = [Path.cwd()]
     for raw_root in os.environ.get(SKILL_SOURCE_ROOTS_ENV, "").split(os.pathsep):
         raw_root = raw_root.strip()
         if raw_root:
             roots.append(Path(raw_root).expanduser())
-
-    resolved_roots: list[Path] = []
-    for root in roots:
-        resolved_roots.append(root)
-        try:
-            resolved_root = root.resolve()
-            if resolved_root != root:
-                resolved_roots.append(resolved_root)
-        except (OSError, RuntimeError):
-            logger.debug("Ignoring unavailable skill source root: %s", root)
-    return tuple(resolved_roots)
+    return tuple(roots)
 
 
-def _normalize_skill_path(path: str) -> str:
-    return os.path.normpath(os.path.realpath(os.path.abspath(os.path.expanduser(path))))
+def _normalize_skill_path(path: Union[str, Path]) -> str:
+    return os.path.normpath(os.path.realpath(os.path.abspath(os.path.expanduser(os.fspath(path)))))
 
 
 def _has_allowed_skill_root(path_str: str, root_str: str) -> bool:
@@ -62,7 +39,7 @@ def _has_allowed_skill_root(path_str: str, root_str: str) -> bool:
 
 
 def _resolve_candidate_under_root(raw_path: str, root: Path) -> Optional[str]:
-    root_str = _normalize_skill_path(os.fspath(root))
+    root_str = _normalize_skill_path(root)
     candidate = raw_path if os.path.isabs(raw_path) else os.path.join(root_str, raw_path)
     candidate = _normalize_skill_path(candidate)
     if _has_allowed_skill_root(candidate, root_str):
@@ -70,19 +47,7 @@ def _resolve_candidate_under_root(raw_path: str, root: Path) -> Optional[str]:
     return None
 
 
-def _resolve_under_allowed_skill_root(raw_path: str) -> Optional[str]:
-    for root in _configured_skill_source_roots():
-        try:
-            candidate = _resolve_candidate_under_root(raw_path, root)
-            if candidate is not None:
-                return candidate
-        except (OSError, ValueError):
-            continue
-    return None
-
-
 def _resolve_skill_source_path(source: Union[str, Path]) -> Optional[Path]:
-    """Resolve a caller-provided skill path without allowing arbitrary probing."""
     if isinstance(source, Path):
         raw_path = os.fspath(source)
     elif isinstance(source, str):
@@ -92,61 +57,50 @@ def _resolve_skill_source_path(source: Union[str, Path]) -> Optional[Path]:
     else:
         return None
 
-    try:
-        candidate = _resolve_under_allowed_skill_root(raw_path)
-    except (OSError, RuntimeError, ValueError):
-        return None
-
-    if candidate is None:
-        logger.warning(
-            "Rejected skill source outside allowed roots: %s. Set %s to allow another root.",
-            raw_path,
-            SKILL_SOURCE_ROOTS_ENV,
-        )
-        return None
-
-    return Path(candidate)
-
-
-def _is_skill_entry(path: Path) -> bool:
-    return trusted_is_file(path) and path.name.lower() == "skill.md"
+    for root in _configured_skill_source_roots():
+        try:
+            candidate = _resolve_candidate_under_root(raw_path, root)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if candidate is not None:
+            return Path(candidate)
+    return None
 
 
 def looks_like_skill_source(data) -> bool:
-    """Return True when ``data`` is a SKILL.md file, a directory containing
-    SKILL.md files at any depth, or a directory of skill folders.
+    """Return True for an explicit skill source candidate.
+
+    This helper is intentionally not used by ``remember()`` for auto-dispatch.
+    Callers must opt in with ``content_type="skills"``.
     """
     path = _resolve_skill_source_path(data)
     if path is None:
         return False
     try:
-        if _is_skill_entry(path):
-            return True
+        if trusted_is_file(path):
+            return path.name.lower() == "skill.md"
         if trusted_is_dir(path):
             return any(
-                p.name.lower() == "skill.md" for p in trusted_rglob(path, "*") if trusted_is_file(p)
+                trusted_is_file(candidate) and candidate.name.lower() == "skill.md"
+                for candidate in trusted_rglob(path, "*")
             )
     except OSError:
         return False
     return False
 
 
-def _scope_matches(props: dict, dataset_id: Optional[UUID]) -> bool:
-    scope = props.get("dataset_scope")
-    if not scope:
-        return True
-    if dataset_id is None:
-        return False
-    return str(dataset_id) in scope
-
-
 def _skill_source_data_id(dataset_id: UUID, source: Path) -> UUID:
-    """Stable pseudo data id used to attach direct Skill writes to dataset ACL tables."""
-    return uuid5(NAMESPACE_URL, f"cognee:skills:{dataset_id}:{source}")
+    return uuid5(NAMESPACE_URL, f"cognee:skills:{dataset_id}:{_normalize_skill_path(source)}")
+
+
+def _scoped_skill_id(dataset_id: UUID, skill: Skill) -> UUID:
+    return uuid5(
+        NAMESPACE_URL,
+        f"cognee:skill:{dataset_id}:{skill.source_dir}:{skill.name}",
+    )
 
 
 def _make_storage_context(user, dataset, source: Path) -> Optional[PipelineContext]:
-    """Build a minimal PipelineContext so add_data_points writes dataset ACL rows."""
     if user is None or dataset is None:
         return None
     return PipelineContext(
@@ -157,119 +111,19 @@ def _make_storage_context(user, dataset, source: Path) -> Optional[PipelineConte
     )
 
 
-async def _diff_against_graph(
-    parsed: List[Skill],
-    node_set: str,
-    dataset_id: Optional[UUID] = None,
-) -> Tuple[List[Skill], List[str], List[Tuple[str, str, str, str]]]:
-    """Diff parsed skills against what's already in the graph.
-
-    Returns ``(to_persist, nids_to_delete, change_event_args)`` where:
-
-    * ``to_persist`` — Skills whose ``content_hash`` is new or changed.
-    * ``nids_to_delete`` — graph node IDs for skills that changed or
-      that existed before but are no longer on disk. Both must be
-      cleared from graph and vector before re-adding the new version.
-    * ``change_event_args`` — 4-tuples of
-      ``(name, change_type, old_hash, new_hash)`` to turn into
-      ``SkillChangeEvent`` nodes.
-    """
-    from cognee.infrastructure.databases.graph import get_graph_engine
-    from cognee.modules.engine.models.node_set import NodeSet
-
-    engine = await get_graph_engine()
-    raw_nodes, _ = await engine.get_nodeset_subgraph(node_type=NodeSet, node_name=[node_set])
-    existing: Dict[str, Tuple[str, dict]] = {
-        props.get("name"): (str(nid), props)
-        for nid, props in raw_nodes
-        if props.get("type") == "Skill" and props.get("name") and _scope_matches(props, dataset_id)
-    }
-
-    parsed_by_name = {s.name: s for s in parsed}
-    to_persist: List[Skill] = []
-    nids_to_delete: List[str] = []
-    events: List[Tuple[str, str, str, str]] = []  # (name, type, old_hash, new_hash)
-
-    for name, skill in parsed_by_name.items():
-        if name in existing:
-            old_nid, old_props = existing[name]
-            old_hash = old_props.get("content_hash", "")
-            if old_hash == skill.content_hash:
-                continue  # unchanged
-            nids_to_delete.append(old_nid)
-            to_persist.append(skill)
-            events.append((name, "updated", old_hash, skill.content_hash))
-        else:
-            to_persist.append(skill)
-            events.append((name, "added", "", skill.content_hash))
-
-    for name in existing:
-        if name not in parsed_by_name:
-            old_nid, old_props = existing[name]
-            nids_to_delete.append(old_nid)
-            events.append((name, "removed", old_props.get("content_hash", ""), ""))
-
-    return to_persist, nids_to_delete, events
-
-
-async def _delete_stale(nids_to_delete: List[str]) -> None:
-    """Delete graph nodes and their vector-index rows for stale Skills."""
-    if not nids_to_delete:
-        return
-    from cognee.infrastructure.databases.graph import get_graph_engine
-    from cognee.infrastructure.databases.vector import get_vector_engine
-
-    engine = await get_graph_engine()
-    await engine.delete_nodes(nids_to_delete)
-    vector_engine = get_vector_engine()
-    for field in ("name", "instruction_summary", "description"):
-        try:
-            await vector_engine.delete_data_points(f"Skill_{field}", nids_to_delete)
-        except Exception:
-            pass
-    logger.info("Deleted %d stale skill node(s)", len(nids_to_delete))
-
-
 async def add_skills(
     source: Union[str, Path],
-    enrich: bool = True,
+    *,
     source_repo: str = "",
     node_set: str = "skills",
     user=None,
     dataset=None,
 ) -> List[Skill]:
-    """Parse SKILL.md file(s) and persist them as Skill DataPoints.
+    """Parse and persist SKILL.md files as dataset-scoped Skill nodes."""
+    if dataset is None or getattr(dataset, "id", None) is None:
+        raise ValueError("Skill ingestion requires one explicit dataset.")
 
-    Args:
-        source: Either a SKILL.md file or a directory of skill folders /
-            flat .md files.
-        enrich: When True (default), runs LLM enrichment (triggers, tags,
-            instruction_summary, complexity, task_pattern_candidates) and
-            materializes TaskPattern nodes before persisting — which
-            makes skill routing by ``cognee.search(..., skills_auto_retrieve=True)``
-            and ``cognee.skills.run(...)`` meaningfully effective. Set
-            to False for fast / offline ingest; the Skill will still be
-            ingested and directly-named ``search(..., skills=["..."])``
-            calls work, but auto-routing quality drops.
-        source_repo: Provenance label attached to each Skill.
-        node_set: Tag applied via ``belongs_to_set`` for vector-search
-            scoping.
-        user: Optional resolved user. When provided with ``dataset``, direct
-            ``add_data_points`` calls write the same dataset ACL rows as normal
-            pipelines.
-        dataset: Optional resolved dataset. Its id is copied to
-            ``Skill.dataset_scope`` so skills cannot leak across datasets.
-
-    Returns:
-        Only the Skills that were *persisted* this call. Unchanged
-        skills (same ``content_hash`` as the graph copy) are silently
-        skipped.
-    """
-    # Late import keeps parser dependencies off the hot import path.
-    from cognee.modules.tools.skill_parser import (
-        parse_skill_file,
-        parse_skills_folder,
-    )
+    from cognee.modules.tools.skill_parser import parse_skill_file, parse_skills_folder
 
     path = _resolve_skill_source_path(source)
     if path is None:
@@ -281,8 +135,8 @@ async def add_skills(
     if trusted_is_dir(path):
         parsed = parse_skills_folder(path, source_repo=source_repo, base_dir=path)
     elif trusted_is_file(path):
-        one = parse_skill_file(path, source_repo=source_repo, base_dir=path.parent)
-        parsed = [one] if one is not None else []
+        skill = parse_skill_file(path, source_repo=source_repo, base_dir=path.parent)
+        parsed = [skill] if skill is not None else []
     else:
         raise FileNotFoundError(f"Skill source not found: {source}")
 
@@ -290,75 +144,18 @@ async def add_skills(
         logger.warning("No SKILL.md files discovered under %s", source)
         return []
 
-    dataset_id = getattr(dataset, "id", None)
-    if dataset_id is not None:
-        scope = str(dataset_id)
-        for skill in parsed:
-            if not skill.dataset_scope:
-                skill.dataset_scope = [scope]
-            elif scope not in skill.dataset_scope:
-                skill.dataset_scope.append(scope)
+    dataset_id = dataset.id
+    scoped: List[Skill] = []
+    for skill in parsed:
+        skill.id = _scoped_skill_id(dataset_id, skill)
+        skill.dataset_scope = [str(dataset_id)]
+        skill.belongs_to_set = [node_set]
+        if not skill.search_text:
+            skill.search_text = "\n\n".join(
+                part for part in (skill.name, skill.description, skill.procedure) if part
+            )
+        scoped.append(skill)
 
-    ctx = _make_storage_context(user, dataset, path)
-
-    # Diff against what's already in the graph. Skip unchanged, delete
-    # old copies of changed skills + skills that disappeared from disk,
-    # and emit SkillChangeEvent nodes for the audit trail.
-    to_persist, nids_to_delete, events = await _diff_against_graph(parsed, node_set, dataset_id)
-    await _delete_stale(nids_to_delete)
-
-    if events:
-        from cognee.modules.tools.skill_change_events import _make_change_event
-
-        change_nodes = [
-            _make_change_event(name, name, change_type, old_hash=oh, new_hash=nh)
-            for name, change_type, oh, nh in events
-        ]
-        await add_data_points(change_nodes, ctx=ctx)
-
-    if not to_persist:
-        logger.info("No changes to persist for %s (all %d skill(s) unchanged)", source, len(parsed))
-        return []
-
-    if enrich:
-        from cognee.pipelines import Task, run_tasks
-        from cognee.modules.users.methods import get_default_user
-        from cognee.modules.data.methods import load_or_create_datasets
-        from cognee.tasks.storage.index_graph_edges import index_graph_edges
-
-        from cognee.modules.tools.skill_enrichment_tasks import enrich_skills
-        from cognee.modules.tools.skill_pattern_tasks import (
-            materialize_task_patterns,
-        )
-        from cognee.modules.tools.skill_node_set_task import apply_node_set
-
-        if user is None:
-            user = await get_default_user()
-        if dataset is None:
-            datasets = await load_or_create_datasets([node_set], [], user)
-            dataset = datasets[0]
-        dataset_id = dataset.id
-
-        tasks = [
-            Task(enrich_skills),
-            Task(materialize_task_patterns),
-            Task(apply_node_set, node_set=node_set),
-            Task(add_data_points),
-        ]
-        async for status in run_tasks(
-            tasks, dataset_id, to_persist, user, "skills_enrich_pipeline"
-        ):
-            logger.info("Enrich pipeline status: %s", status)
-        await index_graph_edges()
-    else:
-        await add_data_points(to_persist, ctx=ctx)
-
-    logger.info(
-        "Ingested %d skill(s) from %s (enrich=%s); %d unchanged, %d removed",
-        len(to_persist),
-        source,
-        enrich,
-        len(parsed) - len(to_persist),
-        sum(1 for _, ct, _, _ in events if ct == "removed"),
-    )
-    return to_persist
+    await add_data_points(scoped, ctx=_make_storage_context(user, dataset, path))
+    logger.info("Ingested %d skill(s) from %s into dataset %s", len(scoped), source, dataset.name)
+    return scoped

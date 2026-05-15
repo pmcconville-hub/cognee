@@ -1,127 +1,283 @@
-"""Memify task: find underperforming skills and improve them in one pass.
-
-``improve_failing_skills`` is the one public function here. It's a
-memify-compatible task: call it directly via ``cognee.memify`` or via
-``cognee.remember(path, improve=True)``.
-
-Flow per invocation:
-
-  1. Query the graph for every Skill in the ``"skills"`` node_set.
-  2. For each, call ``inspect_skill`` — skips Skills without enough
-     low-scored ``SkillRun`` records (default: 3 runs below score 0.5).
-  3. Inspections that return produce a fresh amendment proposal via the
-     LLM.
-  4. The amendment is applied in the graph immediately — no preview,
-     no rollback. If you need those, call ``skill_preview_amendify``
-     + ``skill_amendify`` directly (they still exist as lower-level
-     helpers).
-  5. A ``SkillChangeEvent`` is emitted for every applied amendment.
-
-Returns the list of applied ``SkillAmendment`` nodes for inspection.
-"""
+"""Internal proposal-first skill improvement used by remember()."""
 
 from __future__ import annotations
 
-import logging
-from typing import Any, Dict, List, Optional
+from types import SimpleNamespace
+from typing import Any, Optional
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
-from cognee.infrastructure.databases.graph import get_graph_engine
-from cognee.modules.engine.models.node_set import NodeSet
+from pydantic import BaseModel, Field
 
-from cognee.modules.memify.skill_inspect import inspect_skill
-from cognee.modules.memify.skill_preview_amendify import preview_skill_amendify
-from cognee.modules.memify.skill_amendify import amendify as _amendify_apply
-
-logger = logging.getLogger(__name__)
-
-
-async def _list_skill_names(node_set: str) -> List[str]:
-    """Return the canonical ``name`` of every Skill in the given node_set."""
-    engine = await get_graph_engine()
-    raw_nodes, _ = await engine.get_nodeset_subgraph(node_type=NodeSet, node_name=[node_set])
-    return [
-        props["name"]
-        for _, props in raw_nodes
-        if props.get("type") == "Skill" and props.get("name")
-    ]
+from cognee.modules.engine.models import Skill, SkillImprovementProposal, SkillRun
+from cognee.modules.pipelines.models import PipelineContext
+from cognee.modules.tools.resolve_skills import find_skill_by_id, find_skill_by_name
+from cognee.shared.logging_utils import get_logger
+from cognee.tasks.storage.add_data_points import add_data_points
 
 
-async def _load_skill_dict(skill_name: str, node_set: str) -> Optional[Dict[str, Any]]:
-    """Load a Skill node's full property dict, matching what preview_amendify expects."""
-    engine = await get_graph_engine()
-    raw_nodes, _ = await engine.get_nodeset_subgraph(node_type=NodeSet, node_name=[node_set])
-    for _, props in raw_nodes:
-        if props.get("type") == "Skill" and props.get("name") == skill_name:
-            return {
-                "skill_id": props.get("name", ""),
-                "name": props.get("name", ""),
-                "instructions": props.get("procedure", ""),
-                "instruction_summary": props.get("instruction_summary", ""),
-                "description": props.get("description", ""),
-                "source_path": props.get("source_path", ""),
-            }
+logger = get_logger("cognee.skill_improvement")
+
+
+class SkillImprovementDraft(BaseModel):
+    proposed_procedure: str = Field(default="")
+    rationale: str = Field(default="")
+    confidence: float = Field(default=0.0)
+
+
+def _dataset_scope(dataset) -> list[str]:
+    dataset_id = getattr(dataset, "id", None)
+    return [str(dataset_id)] if dataset_id is not None else []
+
+
+def _storage_context(user, dataset, key: str) -> Optional[PipelineContext]:
+    dataset_id = getattr(dataset, "id", None)
+    if user is None or dataset is None or dataset_id is None:
+        return None
+    return PipelineContext(
+        user=user,
+        dataset=dataset,
+        data_item=SimpleNamespace(id=uuid5(NAMESPACE_URL, f"cognee:skill-improvement:{key}")),
+        pipeline_name="skill_improvement_pipeline",
+    )
+
+
+async def improve_skill_from_config(
+    config: dict[str, Any],
+    *,
+    dataset,
+    user=None,
+) -> Optional[SkillImprovementProposal]:
+    """Run the internal skill-improvement operation requested by remember()."""
+    if not isinstance(config, dict):
+        raise ValueError("skill_improvement must be a configuration dictionary.")
+
+    skill_name = config.get("skill_name") or config.get("name")
+    proposal_id = config.get("proposal_id")
+    apply = bool(config.get("apply", False))
+
+    if not skill_name:
+        raise ValueError("skill_improvement requires 'skill_name'.")
+
+    return await improve_skill(
+        skill_name,
+        dataset=dataset,
+        user=user,
+        proposal_id=proposal_id,
+        apply=apply,
+        score_threshold=float(config.get("score_threshold", 0.5)),
+        max_runs=int(config.get("max_runs", 5)),
+    )
+
+
+async def improve_skill(
+    skill_name: str,
+    *,
+    dataset,
+    user=None,
+    proposal_id: Optional[str] = None,
+    apply: bool = False,
+    score_threshold: float = 0.5,
+    max_runs: int = 5,
+) -> Optional[SkillImprovementProposal]:
+    """Create or apply a graph-only SkillImprovementProposal.
+
+    This is intentionally internal. Callers opt in through ``cognee.remember``
+    with ``skill_improvement={...}``; no top-level public API is exposed.
+    """
+    dataset_id = getattr(dataset, "id", None)
+    if dataset_id is None:
+        raise ValueError("Skill improvement requires one explicit dataset.")
+
+    if apply:
+        if not proposal_id:
+            raise ValueError("skill_improvement apply=True requires proposal_id.")
+        return await _apply_proposal(
+            proposal_id=proposal_id,
+            skill_name=skill_name,
+            dataset_id=dataset_id,
+            dataset=dataset,
+            user=user,
+        )
+
+    skill = await find_skill_by_name(skill_name, dataset_id=dataset_id)
+    if skill is None:
+        raise ValueError(f"Skill {skill_name!r} was not found in dataset {dataset.name!r}.")
+
+    runs = await _find_recent_failure_runs(
+        dataset_id=dataset_id,
+        skill_id=str(skill.id),
+        skill_name=skill.name,
+        score_threshold=score_threshold,
+        max_runs=max_runs,
+    )
+    if not runs:
+        logger.info("No low-scoring or errored SkillRun records for %s", skill.name)
+        return None
+
+    draft = await _generate_proposal(skill, runs)
+    try:
+        from cognee.infrastructure.llm import get_llm_config
+
+        model_name = get_llm_config().llm_model
+    except Exception:
+        model_name = ""
+    proposal = SkillImprovementProposal(
+        proposal_id=str(uuid4()),
+        skill_id=str(skill.id),
+        skill_name=skill.name,
+        dataset_scope=_dataset_scope(dataset),
+        old_procedure=skill.procedure,
+        proposed_procedure=draft.proposed_procedure,
+        runs_used=[run.run_id for run in runs],
+        model_name=model_name,
+        confidence=draft.confidence,
+        rationale=draft.rationale,
+        status="proposed",
+        belongs_to_set=["skills"],
+    )
+    await add_data_points([proposal], ctx=_storage_context(user, dataset, proposal.proposal_id))
+    return proposal
+
+
+async def _apply_proposal(
+    *,
+    proposal_id: str,
+    skill_name: str,
+    dataset_id: UUID,
+    dataset,
+    user=None,
+) -> SkillImprovementProposal:
+    proposal = await _find_proposal(proposal_id=proposal_id, dataset_id=dataset_id)
+    if proposal is None:
+        raise ValueError(f"Proposal {proposal_id!r} was not found in dataset {dataset.name!r}.")
+    if proposal.skill_name != skill_name:
+        raise ValueError("Proposal does not target the requested skill.")
+
+    skill = await find_skill_by_id(proposal.skill_id, dataset_id=dataset_id)
+    if skill is None:
+        skill = await find_skill_by_name(proposal.skill_name, dataset_id=dataset_id)
+    if skill is None:
+        raise ValueError(
+            f"Skill {proposal.skill_name!r} was not found in dataset {dataset.name!r}."
+        )
+
+    skill.procedure = proposal.proposed_procedure
+    skill.search_text = "\n\n".join(
+        part for part in (skill.name, skill.description, skill.procedure) if part
+    )
+    proposal.status = "applied"
+
+    await add_data_points(
+        [skill, proposal],
+        ctx=_storage_context(user, dataset, f"{proposal.proposal_id}:apply"),
+    )
+    return proposal
+
+
+async def _generate_proposal(skill: Skill, runs: list[SkillRun]) -> SkillImprovementDraft:
+    from cognee.modules.retrieval.utils.completion import generate_completion
+
+    run_context = "\n\n".join(
+        f"- run_id={run.run_id}; score={run.success_score}; "
+        f"error={run.error_type or run.error_message or 'none'}; result={run.result_summary}"
+        for run in runs
+    )
+    context = (
+        f"# Skill\nName: {skill.name}\nDescription: {skill.description}\n\n"
+        f"# Current Procedure\n{skill.procedure}\n\n# Failure Evidence\n{run_context}"
+    )
+    return await generate_completion(
+        query="Propose a revised skill procedure. Do not mutate state.",
+        context=context,
+        user_prompt_path="context_for_question.txt",
+        system_prompt_path="answer_simple_question.txt",
+        response_model=SkillImprovementDraft,
+    )
+
+
+async def _find_recent_failure_runs(
+    *,
+    dataset_id: UUID,
+    skill_id: str,
+    skill_name: str,
+    score_threshold: float,
+    max_runs: int,
+) -> list[SkillRun]:
+    runs: list[SkillRun] = []
+    for raw in await _load_nodes_by_type(SkillRun):
+        run = _coerce_model(raw, SkillRun)
+        if run is None:
+            continue
+        if str(dataset_id) not in (run.dataset_scope or []):
+            continue
+        if (
+            run.selected_skill_id not in (skill_id, skill_name)
+            and run.selected_skill_name != skill_name
+        ):
+            continue
+        is_error = bool(run.error_type or run.error_message)
+        is_low_score = run.success_score < score_threshold
+        if is_error or is_low_score:
+            runs.append(run)
+    return sorted(runs, key=lambda run: run.started_at_ms, reverse=True)[:max_runs]
+
+
+async def _find_proposal(
+    *,
+    proposal_id: str,
+    dataset_id: UUID,
+) -> Optional[SkillImprovementProposal]:
+    for raw in await _load_nodes_by_type(SkillImprovementProposal):
+        proposal = _coerce_model(raw, SkillImprovementProposal)
+        if proposal is None:
+            continue
+        if proposal.proposal_id == proposal_id and str(dataset_id) in (
+            proposal.dataset_scope or []
+        ):
+            return proposal
     return None
 
 
-async def improve_failing_skills(
-    data: Any = None,
-    context: Optional[Dict[str, Any]] = None,
-    *,
-    node_set: str = "skills",
-    min_runs: int = 3,
-    score_threshold: float = 0.5,
-) -> List[Dict[str, Any]]:
-    """Find skills whose recent ``SkillRun`` records score poorly and fix them.
-
-    Args:
-        data: Ignored. Present so this function can be used as a memify
-            task (memify tasks accept ``data`` as their first positional
-            argument).
-        context: Ignored. Same reason.
-        node_set: Graph node_set to scope the skill listing.
-        min_runs: Minimum number of sub-threshold ``SkillRun`` records
-            required before a skill is considered for improvement.
-        score_threshold: Runs with ``success_score`` below this count as
-            failures.
-
-    Returns:
-        A list of dicts describing each applied amendment (empty list
-        if no skills needed improvement). Each dict has the shape
-        returned by :func:`cognee.modules.memify.skill_amendify.amendify`.
-    """
-    skill_names = await _list_skill_names(node_set)
-    if not skill_names:
-        logger.info("improve_failing_skills: no skills in node_set '%s'", node_set)
+async def _load_nodes_by_type(model):
+    try:
+        from cognee.infrastructure.databases.graph import get_graph_engine
+    except Exception:
         return []
 
-    applied: List[Dict[str, Any]] = []
-    for skill_name in skill_names:
-        inspection = await inspect_skill(
-            skill_name,
-            min_runs=min_runs,
-            score_threshold=score_threshold,
-            node_set=node_set,
-        )
-        if inspection is None:
-            continue  # not enough failure signal, skip
+    try:
+        graph_engine = await get_graph_engine()
+    except Exception:
+        return []
 
-        skill_dict = await _load_skill_dict(skill_name, node_set)
-        if skill_dict is None:
-            logger.warning("improve_failing_skills: skill '%s' disappeared mid-pass", skill_name)
-            continue
+    get_by_type = getattr(graph_engine, "get_nodes_by_type", None)
+    if get_by_type is not None:
+        try:
+            return await get_by_type(node_type=model)
+        except Exception as exc:
+            logger.warning("Skill improvement lookup failed: %s", exc)
+            return []
 
-        amendment = await preview_skill_amendify(inspection, skill_dict)
-        if amendment is None:
-            continue
+    get_nodeset = getattr(graph_engine, "get_nodeset_subgraph", None)
+    if get_nodeset is None:
+        return []
+    try:
+        nodes, _ = await get_nodeset(node_type=model, node_name=["skills"])
+        return nodes
+    except Exception as exc:
+        logger.warning("Skill improvement nodeset lookup failed: %s", exc)
+        return []
 
-        result = await _amendify_apply(amendment.amendment_id, node_set=node_set)
-        if result.get("success"):
-            applied.append(result)
-            logger.info(
-                "improve_failing_skills: amended '%s' (amendment_id=%s)",
-                skill_name,
-                amendment.amendment_id,
-            )
 
-    logger.info("improve_failing_skills: applied %d amendment(s)", len(applied))
-    return applied
+def _coerce_model(raw, model):
+    if isinstance(raw, model):
+        return raw
+    if isinstance(raw, (list, tuple)) and len(raw) > 1:
+        raw = raw[1]
+    data = raw.model_dump() if hasattr(raw, "model_dump") else raw
+    if not isinstance(data, dict):
+        return None
+    data = {k: v for k, v in data.items() if k != "metadata"}
+    try:
+        return model.model_validate(data)
+    except Exception:
+        return None

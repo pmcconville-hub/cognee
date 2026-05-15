@@ -10,7 +10,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 
-REQUIRED_MEMORY_TOOLS = {"remember", "recall", "forget"}
+EXPECTED_TOOLS = {"remember", "recall", "forget"}
 
 
 class CogneeTestClient:
@@ -41,7 +41,7 @@ class CogneeTestClient:
         return "\n".join(getattr(item, "text", str(item)) for item in result.content)
 
     async def test_tool_discovery(self):
-        """Verify the MCP server exposes the supported memory tools."""
+        """Verify the MCP server exposes only the supported memory tools."""
         print("\nTesting MCP tool discovery...")
 
         try:
@@ -49,15 +49,19 @@ class CogneeTestClient:
                 tools_result = await session.list_tools()
                 available_tools = {tool.name for tool in tools_result.tools}
 
-            missing = REQUIRED_MEMORY_TOOLS - available_tools
-            if missing:
-                raise AssertionError(f"Memory tool surface mismatch. Missing: {sorted(missing)}.")
+            if available_tools != EXPECTED_TOOLS:
+                missing = EXPECTED_TOOLS - available_tools
+                unexpected = available_tools - EXPECTED_TOOLS
+                raise AssertionError(
+                    f"Tool surface mismatch. Missing: {sorted(missing)}. "
+                    f"Unexpected: {sorted(unexpected)}."
+                )
 
             self.test_results["tool_discovery"] = {
                 "status": "PASS",
-                "message": f"Found memory tools: {', '.join(sorted(REQUIRED_MEMORY_TOOLS))}",
+                "message": f"Found tools: {', '.join(sorted(available_tools))}",
             }
-            print(f"PASS tool discovery: {', '.join(sorted(REQUIRED_MEMORY_TOOLS))}")
+            print(f"PASS tool discovery: {', '.join(sorted(available_tools))}")
         except Exception as e:
             self.test_results["tool_discovery"] = {
                 "status": "FAIL",

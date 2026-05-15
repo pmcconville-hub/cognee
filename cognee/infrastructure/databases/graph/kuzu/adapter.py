@@ -7,11 +7,9 @@ churn. New code should import from
 ``cognee.infrastructure.databases.graph.ladybug.adapter`` directly.
 """
 
-from cognee.infrastructure.databases.graph.kuzu.defaults import (
+from cognee.infrastructure.databases.graph.ladybug.adapter import (
     DEFAULT_KUZU_BUFFER_POOL_SIZE,
     DEFAULT_KUZU_MAX_DB_SIZE,
-)
-from cognee.infrastructure.databases.graph.ladybug.adapter import (
     LadybugAdapter,
 )
 

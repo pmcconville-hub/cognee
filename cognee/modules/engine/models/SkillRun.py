@@ -1,7 +1,7 @@
 from typing import Any, Dict, List, Optional
 from pydantic import Field
 
-from cognee.low_level import DataPoint
+from cognee.infrastructure.engine import DataPoint
 
 
 UNSCORED_SKILL_RUN_SCORE = 0.5
@@ -15,16 +15,17 @@ class ToolCall(DataPoint):
     tool_output: Optional[str] = None
     success: bool = True
     duration_ms: int = 0
-    metadata: dict = Field(default_factory=lambda: {"index_fields": []})
+    metadata: dict = {"index_fields": []}
 
 
 class CandidateSkill(DataPoint):
     """A skill considered during routing, with its retrieval score and signals."""
 
     skill_id: str
+    skill_name: str = ""
     score: float = 0.0
     signals: Optional[Dict[str, Any]] = None
-    metadata: dict = Field(default_factory=lambda: {"index_fields": []})
+    metadata: dict = {"index_fields": []}
 
 
 class SkillRun(DataPoint):
@@ -41,6 +42,8 @@ class SkillRun(DataPoint):
     candidate_skills: List[CandidateSkill] = Field(default_factory=list)
     selected_skill: Optional["Skill"] = None
     selected_skill_id: str = ""
+    selected_skill_name: str = ""
+    dataset_scope: List[str] = Field(default_factory=list)
     task_pattern_id: str = ""
     router_version: str = ""
 
@@ -55,12 +58,10 @@ class SkillRun(DataPoint):
 
     previous_run: Optional["SkillRun"] = None
 
-    metadata: dict = Field(
-        default_factory=lambda: {
-            "index_fields": ["task_text", "result_summary"],
-            "identity_fields": ["run_id"],
-        }
-    )
+    metadata: dict = {
+        "index_fields": ["task_text", "result_summary"],
+        "identity_fields": ["run_id"],
+    }
 
 
 from .Skill import Skill  # noqa: E402

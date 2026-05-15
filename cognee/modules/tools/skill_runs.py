@@ -58,11 +58,8 @@ async def remember_skill_run_entry(
     dataset_name: str,
     session_id: Optional[str],
     user=None,
-    improve: bool = False,
-    improve_min_runs: int = 3,
-    improve_score_threshold: float = 0.5,
-) -> tuple[SkillRun, object, list[dict]]:
-    """Persist a SkillRun and optionally trigger the skill improvement loop."""
+) -> tuple[SkillRun, object]:
+    """Persist a dataset-scoped SkillRun from the remember() typed-entry path."""
     await setup()
 
     if user is None:
@@ -81,17 +78,25 @@ async def remember_skill_run_entry(
         )
 
     selected_skill = resolved_skills[0]
-    candidate_ids = entry.candidate_skill_ids or [selected_skill.name]
+    candidate_ids = entry.candidate_skill_ids or [str(selected_skill.id)]
     success_score = UNSCORED_SKILL_RUN_SCORE if entry.success_score is None else entry.success_score
 
     run = SkillRun(
         run_id=entry.run_id,
-        selected_skill_id=selected_skill.name,
+        selected_skill_id=str(selected_skill.id),
+        selected_skill_name=selected_skill.name,
+        dataset_scope=[str(dataset.id)],
         task_text=entry.task_text,
         result_summary=entry.result_summary,
         success_score=success_score,
         session_id=session_id or "agentic",
-        candidate_skills=[CandidateSkill(skill_id=skill_id) for skill_id in candidate_ids],
+        candidate_skills=[
+            CandidateSkill(
+                skill_id=str(skill_id),
+                skill_name=selected_skill.name if str(skill_id) == str(selected_skill.id) else "",
+            )
+            for skill_id in candidate_ids
+        ],
         task_pattern_id=entry.task_pattern_id,
         router_version=entry.router_version,
         tool_trace=_coerce_tool_trace(entry.tool_trace),
@@ -107,14 +112,4 @@ async def remember_skill_run_entry(
 
     await add_data_points([run], ctx=_make_storage_context(user, dataset, entry.run_id))
 
-    applied_amendments: list[dict] = []
-    if improve:
-        from cognee.modules.memify.skill_improvement import improve_failing_skills
-
-        applied_amendments = await improve_failing_skills(
-            node_set=entry.node_set,
-            min_runs=improve_min_runs,
-            score_threshold=improve_score_threshold,
-        )
-
-    return run, dataset, applied_amendments
+    return run, dataset

@@ -257,23 +257,17 @@ async def get_search_type_retriever_instance(
         ),
     }
 
-    # Build AgenticRetriever when explicitly requested OR when the caller passed
-    # skills/tools alongside a GRAPH_COMPLETION-family type. This preserves the
-    # existing default (`search("q")` behaves as before) but lets skills/tools
-    # activate the tool-use loop without forcing callers to pick a new enum value.
+    # Build AgenticRetriever only when explicitly requested. Other graph-completion
+    # variants keep their existing retrievers even when retriever-specific config
+    # contains skill/tool-looking keys.
     has_skills = bool(retriever_specific_config.get("skills"))
     has_tools = retriever_specific_config.get("tools") is not None
-    has_auto_retrieve = bool(retriever_specific_config.get("skills_auto_retrieve"))
-    upgrade_types = {
-        SearchType.GRAPH_COMPLETION,
-        SearchType.GRAPH_COMPLETION_COT,
-        SearchType.GRAPH_COMPLETION_DECOMPOSITION,
-        SearchType.GRAPH_COMPLETION_CONTEXT_EXTENSION,
-    }
+    if query_type is not SearchType.AGENTIC_COMPLETION and (has_skills or has_tools):
+        raise UnsupportedSearchTypeError(
+            "skills/tools are supported only with SearchType.AGENTIC_COMPLETION"
+        )
 
-    if query_type is SearchType.AGENTIC_COMPLETION or (
-        query_type in upgrade_types and (has_skills or has_tools or has_auto_retrieve)
-    ):
+    if query_type is SearchType.AGENTIC_COMPLETION:
         dataset = kwargs.get("dataset")
         dataset_id = dataset.id if dataset is not None else None
         user = kwargs.get("user")
@@ -286,10 +280,9 @@ async def get_search_type_retriever_instance(
             skills=retriever_specific_config.get("skills"),
             tools=retriever_specific_config.get("tools"),
             user=user,
+            dataset=dataset,
             dataset_id=dataset_id,
             max_iter=retriever_specific_config.get("max_iter", 6),
-            skills_auto_retrieve=retriever_specific_config.get("skills_auto_retrieve", False),
-            skills_top_k=retriever_specific_config.get("skills_top_k", 3),
             agentic_system_prompt_path=retriever_specific_config.get(
                 "agentic_system_prompt_path", "agentic_system.txt"
             ),

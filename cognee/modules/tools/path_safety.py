@@ -1,4 +1,4 @@
-"""Filesystem helpers for local profile and skill source ingestion."""
+"""Filesystem helpers for local skill source ingestion."""
 
 from __future__ import annotations
 

@@ -37,6 +37,7 @@ def get_remember_router() -> APIRouter:
         custom_prompt: Optional[str] = Form(default=""),
         chunk_size: Optional[int] = Form(default=None),
         chunks_per_batch: Optional[int] = Form(default=10),
+        content_type: Optional[str] = Form(default=None),
         user: User = Depends(get_authenticated_user),
     ):
         """
@@ -92,6 +93,7 @@ def get_remember_router() -> APIRouter:
                 custom_prompt=custom_prompt or None,
                 chunk_size=chunk_size,
                 chunks_per_batch=chunks_per_batch,
+                content_type=content_type,
             )
 
             return jsonable_encoder(result.to_dict())
@@ -116,9 +118,7 @@ def get_remember_router() -> APIRouter:
         ]
         dataset_name: str = "main_dataset"
         session_id: Optional[str] = None
-        improve: bool = False
-        improve_min_runs: int = 3
-        improve_score_threshold: float = 0.5
+        skill_improvement: Optional[dict] = None
 
     @router.post("/entry", response_model=dict)
     @log_usage(function_name="POST /v1/remember/entry", log_type="api_endpoint")
@@ -157,9 +157,7 @@ def get_remember_router() -> APIRouter:
                 dataset_name=payload.dataset_name,
                 session_id=payload.session_id,
                 user=user,
-                improve=payload.improve,
-                improve_min_runs=payload.improve_min_runs,
-                improve_score_threshold=payload.improve_score_threshold,
+                skill_improvement=payload.skill_improvement,
             )
             return jsonable_encoder(result.to_dict())
         except ValueError as error:

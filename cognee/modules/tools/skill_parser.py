@@ -1,17 +1,4 @@
-"""Parser for skill documentation files.
-
-Supports multiple community formats:
-  - Anthropic agent-skills spec (SKILL.md, name + description frontmatter)
-  - OpenClaw skills (same spec + metadata.openclaw extensions)
-  - Muratcankoylan context-engineering skills (body-heavy with When to Activate section)
-  - Any markdown file with enough content to infer a skill
-
-Entry file discovery order per folder:
-  SKILL.md → skill.md → README.md (only if it looks like a skill)
-
-Required for a valid skill: a non-empty name (or inferable from folder/file name)
-  and non-empty body (description can be derived by LLM from body if missing).
-"""
+"""Small SKILL.md parser for the v1 agentic-skills flow."""
 
 from __future__ import annotations
 
@@ -24,61 +11,22 @@ from uuid import UUID, uuid5
 
 import yaml
 
-from cognee.modules.engine.models.Skill import Skill, SkillResource
+from cognee.modules.engine.models import Skill
 from cognee.modules.tools.path_safety import (
     trusted_is_dir,
     trusted_is_file,
-    trusted_iterdir,
     trusted_read_text,
     trusted_rglob,
 )
 from cognee.shared.logging_utils import get_logger
 
+
 logger = get_logger(__name__)
 
 NAMESPACE = UUID("a1b2c3d4-e5f6-7890-abcd-ef1234567890")
 
-# Ordered list of candidate entry file names to try per skill folder
-SKILL_ENTRY_CANDIDATES = ["SKILL.md", "skill.md", "Skill.md"]
-
-# README.md accepted only when the folder contains no other .md file that looks like a skill
-README_CANDIDATES = ["README.md", "readme.md"]
-NON_SKILL_ENTRY_NAMES = {"agent.md", "memory.md", "agents.md"}
-
-RESOURCE_TYPE_MAP = {
-    "scripts": "script",
-    "references": "reference",
-    "assets": "asset",
-}
-
-BINARY_EXTENSIONS = {
-    ".png",
-    ".jpg",
-    ".jpeg",
-    ".gif",
-    ".webp",
-    ".ico",
-    ".svg",
-    ".pdf",
-    ".zip",
-    ".tar",
-    ".gz",
-    ".bz2",
-    ".woff",
-    ".woff2",
-    ".ttf",
-    ".eot",
-    ".pyc",
-    ".pyo",
-    ".so",
-    ".dylib",
-    ".dll",
-}
-
-# Frontmatter key aliases → canonical field name
-_NAME_ALIASES = ("name", "title", "skill_name", "skill-name")
 _DESCRIPTION_ALIASES = ("description", "summary", "short_description", "about")
-_TAGS_ALIASES = ("tags", "categories", "keywords", "labels")
+_TOOLS_ALIASES = ("allowed-tools", "allowed_tools", "declared_tools", "tools")
 
 
 def _deterministic_id(namespace_key: str) -> UUID:
@@ -89,58 +37,21 @@ def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
-def _is_binary(path: Path) -> bool:
-    return path.suffix.lower() in BINARY_EXTENSIONS
+def _normalize_path(path: Path) -> str:
+    return os.path.normpath(os.path.realpath(os.path.abspath(os.fspath(path))))
 
 
 def _is_relative_to(path: Path, base_dir: Path) -> bool:
     try:
-        path_str = os.path.normpath(os.path.realpath(os.path.abspath(os.fspath(path))))
-        base_str = os.path.normpath(os.path.realpath(os.path.abspath(os.fspath(base_dir))))
+        path_str = _normalize_path(path)
+        base_str = _normalize_path(base_dir)
     except (OSError, RuntimeError, ValueError):
         return False
     base_prefix = base_str if base_str.endswith(os.sep) else f"{base_str}{os.sep}"
     return path_str == base_str or path_str.startswith(base_prefix)
 
 
-def _read_text_safe(
-    path: Path,
-    max_chars: int = 50_000,
-    base_dir: Optional[Path] = None,
-) -> Optional[str]:
-    if _is_binary(path):
-        return None
-    if base_dir is not None and not _is_relative_to(path, base_dir):
-        logger.warning("Skipping skill resource outside allowed base directory")
-        return None
-    try:
-        text = trusted_read_text(path, encoding="utf-8", errors="replace")
-        if len(text) > max_chars:
-            text = text[:max_chars] + "\n... [truncated]"
-        return text
-    except Exception:
-        return None
-
-
-def _classify_resource(path: Path, skill_dir: Path) -> str:
-    try:
-        relative = path.relative_to(skill_dir)
-        top_dir = relative.parts[0] if len(relative.parts) > 1 else ""
-        return RESOURCE_TYPE_MAP.get(top_dir, "other")
-    except ValueError:
-        return "other"
-
-
-# ---------------------------------------------------------------------------
-# Frontmatter parsing
-# ---------------------------------------------------------------------------
-
-
 def _parse_frontmatter(text: str) -> tuple[Dict[str, Any], str]:
-    """Split YAML frontmatter and markdown body.
-
-    Handles standard --- delimiters. Returns ({}, full_text) if no frontmatter.
-    """
     match = re.match(r"^---\s*\r?\n(.*?)\r?\n---\s*\r?\n?(.*)", text, re.DOTALL)
     if not match:
         return {}, text.strip()
@@ -148,7 +59,7 @@ def _parse_frontmatter(text: str) -> tuple[Dict[str, Any], str]:
     try:
         frontmatter = yaml.safe_load(match.group(1)) or {}
     except yaml.YAMLError as exc:
-        logger.warning("Failed to parse YAML frontmatter: %s", exc)
+        logger.warning("Failed to parse SKILL.md frontmatter: %s", exc)
         frontmatter = {}
 
     if not isinstance(frontmatter, dict):
@@ -157,185 +68,41 @@ def _parse_frontmatter(text: str) -> tuple[Dict[str, Any], str]:
     return frontmatter, match.group(2).strip()
 
 
-def _pop_first(d: Dict[str, Any], aliases: tuple) -> Any:
-    """Pop and return the first matching key from a dict."""
+def _pop_first(data: Dict[str, Any], aliases: tuple[str, ...]) -> Any:
     for key in aliases:
-        if key in d:
-            return d.pop(key)
+        if key in data:
+            return data.pop(key)
     return None
 
 
-# ---------------------------------------------------------------------------
-# Field extractors
-# ---------------------------------------------------------------------------
-
-
-def _extract_name(frontmatter: Dict[str, Any], fallback: str) -> str:
-    val = _pop_first(frontmatter, _NAME_ALIASES)
-    return str(val).strip() if val else fallback
-
-
 def _extract_description(frontmatter: Dict[str, Any], body: str) -> str:
-    """Extract description from frontmatter aliases, or infer from body.
+    raw = _pop_first(frontmatter, _DESCRIPTION_ALIASES)
+    if raw:
+        return str(raw).strip()
 
-    Falls back to the first non-heading paragraph so the LLM enrichment
-    step has something to work with even for format-free files.
-    """
-    val = _pop_first(frontmatter, _DESCRIPTION_ALIASES)
-    if val:
-        return str(val).strip()
-
-    # Try first non-heading paragraph of the body
-    for para in re.split(r"\n{2,}", body):
-        para = para.strip()
-        if para and not para.startswith("#") and len(para) >= 30:
-            # Strip inline markdown (bold/italic/code) for a clean hint
-            clean = re.sub(r"[`*_~]", "", para)
-            return clean[:500]
+    for paragraph in re.split(r"\n{2,}", body):
+        paragraph = paragraph.strip()
+        if paragraph and not paragraph.startswith("#"):
+            return re.sub(r"[`*_~]", "", paragraph)[:500]
 
     return ""
 
 
-def _extract_tags(frontmatter: Dict[str, Any], body: str) -> List[str]:
-    """Extract tags from frontmatter (multiple alias forms + nested metadata)."""
-    # Explicit tags fields
-    raw = _pop_first(frontmatter, _TAGS_ALIASES)
-    if raw is not None:
-        if isinstance(raw, list):
-            return [str(t).strip() for t in raw if t]
-        return [t.strip() for t in str(raw).split(",") if t.strip()]
-
-    # OpenClaw: metadata.openclaw.tags
-    metadata = frontmatter.get("metadata")
-    if isinstance(metadata, dict):
-        openclaw = metadata.get("openclaw", {})
-        if isinstance(openclaw, dict) and openclaw.get("tags"):
-            raw = openclaw["tags"]
-            if isinstance(raw, list):
-                return [str(t).strip() for t in raw if t]
-
-    # Fall back to ## headings as rough tags (max 8)
-    tags: List[str] = []
-    for m in re.finditer(r"^##\s+(.+)", body, re.MULTILINE):
-        heading = re.sub(r"[^a-z0-9\s-]", "", m.group(1).strip().lower()).strip()
-        if heading and len(heading) < 40:
-            tags.append(heading.replace(" ", "-"))
-    return tags[:8]
-
-
-def _extract_triggers(frontmatter: Dict[str, Any], description: str, body: str) -> List[str]:
-    """Extract trigger phrases from multiple sources.
-
-    Priority:
-      1. Frontmatter `triggers` / `activation` field
-      2. `## When to Activate` section in body (muratcankoylan convention)
-      3. Quoted phrases in description
-      4. Comma/semicolon-split after "use when" / "trigger when" in description
-    """
-    # 1. Frontmatter field
-    raw = frontmatter.pop("triggers", frontmatter.pop("activation", None))
-    if raw:
-        if isinstance(raw, list):
-            return [str(t).strip() for t in raw if t]
-        return [t.strip() for t in str(raw).split(",") if t.strip()]
-
-    # 2. ## When to Activate section
-    activate_match = re.search(
-        r"##\s+When to Activate\s*\n(.*?)(?=\n##|\Z)", body, re.DOTALL | re.IGNORECASE
-    )
-    if activate_match:
-        section = activate_match.group(1)
-        bullets = re.findall(r"[-*]\s+(.+)", section)
-        if bullets:
-            return [b.strip() for b in bullets[:12]]
-
-    # 3 & 4. From description
-    if description:
-        quoted = re.findall(r'"([^"]{5,})"', description)
-        if quoted:
-            return quoted[:8]
-
-        when_match = re.search(
-            r"(?:use when|trigger when|activate when|triggers?)[:\s]+(.*)", description, re.I
-        )
-        if when_match:
-            parts = re.split(r"[,;]|(?:\bor\b)", when_match.group(1))
-            return [p.strip().strip("\"'") for p in parts if p.strip()][:8]
-
-    return []
-
-
 def _extract_tools(frontmatter: Dict[str, Any]) -> List[str]:
-    """Extract allowed tools from `allowed-tools` or `allowed_tools` (Anthropic spec)."""
-    raw = frontmatter.pop("allowed-tools", frontmatter.pop("allowed_tools", None))
-    if not raw:
+    raw = _pop_first(frontmatter, _TOOLS_ALIASES)
+    if raw is None:
         return []
     if isinstance(raw, list):
-        return [str(t).strip() for t in raw if t]
-    # Space-delimited string per the Anthropic spec
-    return [t.strip() for t in str(raw).split() if t.strip()]
+        return [str(tool).strip() for tool in raw if str(tool).strip()]
+    return [tool.strip() for tool in re.split(r"[\s,]+", str(raw)) if tool.strip()]
 
 
-def _detect_complexity(body: str) -> str:
-    lower = body.lower()
-    if any(kw in lower for kw in ["subagent", "multi-step", "agent loop", "orchestrat"]):
-        return "agent"
-    if any(kw in lower for kw in ["workflow", "pipeline", "step 1", "step 2", "process"]):
-        return "workflow"
-    return "simple"
+def _skill_slug(skill_file: Path) -> str:
+    return skill_file.parent.name
 
 
-# ---------------------------------------------------------------------------
-# File / folder discovery
-# ---------------------------------------------------------------------------
-
-
-def _find_skill_file(skill_dir: Path) -> Optional[Path]:
-    """Return the skill entry file inside a directory, trying multiple names."""
-    for name in SKILL_ENTRY_CANDIDATES:
-        p = skill_dir / name
-        if trusted_is_file(p):
-            return p
-
-    # Accept README.md only if there's no other .md file that could be a skill
-    for name in README_CANDIDATES:
-        p = skill_dir / name
-        if trusted_is_file(p):
-            return p
-
-    return None
-
-
-def _scan_resources(
-    skill_dir: Path,
-    entry_file: Path,
-    base_dir: Optional[Path] = None,
-) -> List[SkillResource]:
-    resources: List[SkillResource] = []
-    for item in sorted(trusted_rglob(skill_dir, "*")):
-        if not trusted_is_file(item) or item == entry_file:
-            continue
-        if base_dir is not None and not _is_relative_to(item, base_dir):
-            logger.warning("Skipping skill resource outside allowed base directory")
-            continue
-        rel_path = str(item.relative_to(skill_dir))
-        resource_type = _classify_resource(item, skill_dir)
-        content = _read_text_safe(item, base_dir=base_dir)
-        resource = SkillResource(
-            id=_deterministic_id(f"resource:{skill_dir.name}/{rel_path}"),
-            name=item.name,
-            path=rel_path,
-            resource_type=resource_type,
-            content=content,
-            content_hash=_content_hash(content) if content else "",
-        )
-        resources.append(resource)
-    return resources
-
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
+def _build_search_text(name: str, description: str, procedure: str) -> str:
+    return "\n\n".join(part for part in (name, description, procedure) if part)
 
 
 def parse_skill_file(
@@ -344,118 +111,36 @@ def parse_skill_file(
     skill_key: Optional[str] = None,
     base_dir: Optional[Path] = None,
 ) -> Optional[Skill]:
-    """Parse a skill markdown file into a Skill DataPoint.
-
-    Tolerates missing or thin frontmatter. If `description` cannot be found
-    in frontmatter or inferred from the body, it is left empty so that the
-    LLM enrichment step (enrich_skills) can derive it from the full body text.
-
-    Args:
-        skill_md: Path to the skill file.
-        source_repo: Provenance label.
-        skill_key: Override for skill_id; defaults to parent directory name
-                   or file stem for flat files.
-    """
+    """Parse one concrete SKILL.md file into one Skill node."""
     skill_md = Path(skill_md)
     if base_dir is not None and not _is_relative_to(skill_md, base_dir):
         raise ValueError(f"Skill file is outside the allowed base directory: {skill_md}")
-
-    if not trusted_is_file(skill_md):
+    if not trusted_is_file(skill_md) or skill_md.name.lower() != "skill.md":
         return None
 
     raw_text = trusted_read_text(skill_md, encoding="utf-8")
     if not raw_text.strip():
         return None
 
-    if skill_key is None:
-        # For ``SKILL.md`` / ``skill.md`` / ``README.md`` in a ``<slug>/``
-        # folder, the slug is the parent directory name. For a flat
-        # ``<slug>.md`` file the slug is the file stem. Matches
-        # parse_skills_folder()'s Pass 1 vs Pass 2 split.
-        _folder_entries = {c.upper() for c in SKILL_ENTRY_CANDIDATES} | {"README.MD"}
-        if skill_md.name.upper() in _folder_entries:
-            skill_key = skill_md.parent.name
-        else:
-            skill_key = skill_md.stem
-
     frontmatter, body = _parse_frontmatter(raw_text)
-
-    # ``_extract_name`` pops the ``name`` alias off so it isn't re-stored
-    # in extra_metadata. The unified Skill uses skill_key as ``name``; the
-    # frontmatter display name survives in description_raw.
-    _extract_name(frontmatter, fallback=skill_key)
+    name = skill_key or _skill_slug(skill_md)
     description = _extract_description(frontmatter, body)
-    tags = _extract_tags(frontmatter, body)
-    triggers = _extract_triggers(frontmatter, description, body)
-    tools = _extract_tools(frontmatter)
-    complexity = _detect_complexity(body)
-
-    skill_dir = skill_md.parent
-    resources = (
-        _scan_resources(skill_dir, skill_md, base_dir=base_dir)
-        if skill_dir != skill_dir.parent
-        else []
-    )
-
-    # Preserve any remaining unknown frontmatter fields as extra_metadata
-    known_keys = (
-        set(_NAME_ALIASES)
-        | set(_DESCRIPTION_ALIASES)
-        | set(_TAGS_ALIASES)
-        | {
-            "triggers",
-            "activation",
-            "allowed-tools",
-            "allowed_tools",
-            "license",
-            "compatibility",
-            "homepage",
-            "metadata",
-        }
-    )
-    extra = {k: v for k, v in frontmatter.items() if k not in known_keys} or None
+    declared_tools = _extract_tools(frontmatter)
+    source_file = _normalize_path(skill_md)
+    source_dir = _normalize_path(skill_md.parent)
 
     return Skill(
-        id=_deterministic_id(f"skill:{skill_key}"),
-        # ``name`` holds the canonical slug identifier (folder name or
-        # explicit frontmatter ``skill_id:``), NOT the human-readable
-        # frontmatter ``name:`` value. This is what every downstream
-        # reader — client.load, resolve_skills, inspect, amendify —
-        # looks up by. The display name from frontmatter is preserved
-        # in ``description_raw`` and the enrichment pipeline.
-        name=skill_key,
+        id=_deterministic_id(f"skill:{source_dir}:{name}"),
+        name=name,
         description=description,
         procedure=body,
-        declared_tools=tools,
-        description_raw=description,
-        triggers_raw=triggers,
-        tags_raw=tags,
-        triggers=triggers,
-        tags=tags,
-        source_path=str(skill_md.parent),
-        source_repo=source_repo,
+        declared_tools=declared_tools,
+        source_file=source_file,
+        source_dir=source_dir,
         content_hash=_content_hash(raw_text),
-        complexity=complexity,
-        is_active=True,
-        extra_metadata=extra,
-        resources=resources,
-        related_skills=[],
+        search_text=_build_search_text(name, description, body),
+        belongs_to_set=["skills"],
     )
-
-
-def parse_skill_folder(
-    skill_dir: Path,
-    source_repo: str = "",
-    base_dir: Optional[Path] = None,
-) -> Optional[Skill]:
-    """Parse a single skill folder into a Skill DataPoint.
-
-    Tries SKILL.md, skill.md, Skill.md, then README.md.
-    """
-    entry = _find_skill_file(skill_dir)
-    if entry is None:
-        return None
-    return parse_skill_file(entry, source_repo=source_repo, base_dir=base_dir)
 
 
 def parse_skills_folder(
@@ -463,63 +148,17 @@ def parse_skills_folder(
     source_repo: str = "",
     base_dir: Optional[Path] = None,
 ) -> List[Skill]:
-    """Parse all skills under a root directory.
-
-    Supports two layouts:
-      1. Subfolder convention: skills_root/my-skill/SKILL.md
-      2. Flat files:           skills_root/my-skill.md
-
-    Args:
-        skills_root: Path to the directory containing skill subdirectories or files.
-        source_repo: Provenance label (e.g. "anthropics/skills").
-
-    Returns:
-        List of Skill DataPoints, one per valid skill found.
-    """
+    """Parse every SKILL.md under a directory. Removed files are ignored in v1."""
     skills_root = Path(skills_root)
     if not trusted_is_dir(skills_root):
         raise FileNotFoundError(f"Skills directory not found: {skills_root}")
     base_dir = Path(base_dir) if base_dir is not None else skills_root
 
-    if not source_repo:
-        source_repo = skills_root.name
-
-    seen_keys: set[str] = set()
     skills: List[Skill] = []
-
-    # Pass 1: subfolder skills
-    for child in sorted(trusted_iterdir(skills_root)):
-        if not trusted_is_dir(child):
+    for skill_file in sorted(trusted_rglob(skills_root, "*")):
+        if not trusted_is_file(skill_file) or skill_file.name.lower() != "skill.md":
             continue
-        skill = parse_skill_folder(child, source_repo=source_repo, base_dir=base_dir)
+        skill = parse_skill_file(skill_file, source_repo=source_repo, base_dir=base_dir)
         if skill is not None:
-            seen_keys.add(skill.name)
             skills.append(skill)
-
-    # Pass 2: flat .md files at root (skip if already covered by a folder)
-    for child in sorted(trusted_iterdir(skills_root)):
-        if not trusted_is_file(child) or child.suffix.lower() != ".md":
-            continue
-        if child.name.lower() in NON_SKILL_ENTRY_NAMES:
-            continue
-
-        skill_key = (
-            skills_root.name
-            if child.name.upper() in {c.upper() for c in SKILL_ENTRY_CANDIDATES}
-            else child.stem
-        )
-
-        if skill_key in seen_keys:
-            continue
-
-        skill = parse_skill_file(
-            child,
-            source_repo=source_repo,
-            skill_key=skill_key,
-            base_dir=base_dir,
-        )
-        if skill is not None:
-            seen_keys.add(skill_key)
-            skills.append(skill)
-
     return skills
