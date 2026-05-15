@@ -42,7 +42,7 @@ on:
 
 jobs:
   run-kuzu-lance-sqlite-caching:
-    name: Adapter caching (Kuzu / LanceDB / Sqlite)
+    name: Adapter caching — Kuzu + LanceDB + Sqlite
     runs-on: ubuntu-22.04
     container: ${{ inputs.ci-image != '' && fromJSON(format('{{"image":"{0}","credentials":{{"username":"{1}","password":"{2}"}}}}', inputs.ci-image, github.actor, github.token)) || null }}
     if: ${{ inputs.databases == 'all' || contains(inputs.databases, 'kuzu/lance/sqlite') }}
@@ -73,7 +73,7 @@ jobs:
         run: uv run python ./cognee/tests/test_adapter_object_caching.py
 
   run-ladybug-lance-sqlite-caching:
-    name: Adapter caching (Ladybug / LanceDB / Sqlite)
+    name: Adapter caching — Ladybug + LanceDB + Sqlite
     runs-on: ubuntu-22.04
     container: ${{ inputs.ci-image != '' && fromJSON(format('{{"image":"{0}","credentials":{{"username":"{1}","password":"{2}"}}}}', inputs.ci-image, github.actor, github.token)) || null }}
     if: ${{ inputs.databases == 'all' || contains(inputs.databases, 'ladybug/lance/sqlite') }}
@@ -104,7 +104,7 @@ jobs:
         run: uv run python ./cognee/tests/test_adapter_object_caching.py
 
   run-neo4j-lance-sqlite-caching:
-    name: Adapter caching (Neo4j / LanceDB / Sqlite)
+    name: Adapter caching — Neo4j + LanceDB + Sqlite
     runs-on: ubuntu-22.04
     if: ${{ inputs.databases == 'all' || contains(inputs.databases, 'neo4j/lance/sqlite') }}
     steps:
@@ -142,7 +142,7 @@ jobs:
         run: uv run python ./cognee/tests/test_adapter_object_caching.py
 
   run-kuzu-pgvector-postgres-caching:
-    name: Adapter caching (Kuzu / PGVector / Postgres)
+    name: Adapter caching — Kuzu + PGVector + Postgres
     runs-on: ubuntu-22.04
     container: ${{ inputs.ci-image != '' && fromJSON(format('{{"image":"{0}","credentials":{{"username":"{1}","password":"{2}"}}}}', inputs.ci-image, github.actor, github.token)) || null }}
     if: ${{ inputs.databases == 'all' || contains(inputs.databases, 'kuzu/pgvector/postgres') }}
@@ -194,7 +194,7 @@ jobs:
         run: uv run python ./cognee/tests/test_adapter_object_caching.py
 
   run-neo4j-pgvector-postgres-caching:
-    name: Adapter caching (Neo4j / PGVector / Postgres)
+    name: Adapter caching — Neo4j + PGVector + Postgres
     runs-on: ubuntu-22.04
     if: ${{ inputs.databases == 'all' || contains(inputs.databases, 'neo4j/pgvector/postgres') }}
     services:
