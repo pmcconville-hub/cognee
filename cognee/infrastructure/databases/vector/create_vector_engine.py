@@ -55,7 +55,7 @@ def create_vector_engine(
     vector_db_username: str = "",
     vector_db_password: str = "",
     vector_db_host: str = "",
-    vector_db_subprocess_enabled: bool = False,
+    vector_db_subprocess_enabled: bool = True,
 ):
     """
     Wrapper function to call create vector engine with caching.
