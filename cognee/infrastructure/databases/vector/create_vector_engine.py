@@ -95,8 +95,6 @@ def create_vector_engine(
             embedding_engine,
         )
 
-    size = _create_vector_engine.cache_info()
-
     return _create_vector_engine(
         vector_db_provider,
         vector_db_url,
