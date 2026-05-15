@@ -12,10 +12,23 @@ from cognee.infrastructure.databases.graph.get_graph_engine import (
 from cognee.modules.users.models import User, DatasetDatabase
 
 
-def _replace_database_in_url(url: str, new_db: str) -> str:
-    """Replace the database name in a postgresql+asyncpg:// connection string."""
-    base = url.rsplit("/", 1)[0]
-    return f"{base}/{new_db}"
+def _resolve_pg_credentials(graph_config) -> tuple[str, str, str, str]:
+    """Return (host, port, username, password), falling back to the relational config."""
+    host = graph_config.graph_database_host
+    port = graph_config.graph_database_port
+    username = graph_config.graph_database_username
+    password = graph_config.graph_database_password
+
+    if not (host and port and username and password):
+        from cognee.infrastructure.databases.relational import get_relational_config
+
+        relational_config = get_relational_config()
+        host = host or relational_config.db_host
+        port = port or relational_config.db_port
+        username = username or relational_config.db_username
+        password = password or relational_config.db_password
+
+    return host, str(port), username, password
 
 
 class PostgresGraphDatasetDatabaseHandler:
@@ -32,25 +45,31 @@ class PostgresGraphDatasetDatabaseHandler:
             )
 
         graph_db_name = f"{dataset_id}"
-        dataset_url = _replace_database_in_url(graph_config.graph_database_url, graph_db_name)
+        host, port, _, _ = _resolve_pg_credentials(graph_config)
 
         new_graph_config = {
             "graph_database_provider": "postgres",
-            "graph_database_url": dataset_url,
+            "graph_database_url": "",
             "graph_database_name": graph_db_name,
             "graph_database_key": graph_config.graph_database_key,
             "graph_dataset_database_handler": "postgres_graph",
-            "graph_database_connection_info": {},
+            "graph_database_connection_info": {
+                "graph_database_host": host,
+                "graph_database_port": port,
+            },
         }
 
-        await cls._create_pg_database(graph_config.graph_database_url, graph_db_name)
+        await cls._create_pg_database(graph_db_name)
 
         return new_graph_config
 
     @classmethod
-    async def _create_pg_database(cls, base_url: str, db_name: str) -> None:
+    async def _create_pg_database(cls, db_name: str) -> None:
         """Create the per-dataset Postgres database and initialize its tables."""
-        maintenance_url = _replace_database_in_url(base_url, "postgres")
+        graph_config = get_graph_config()
+        host, port, username, password = _resolve_pg_credentials(graph_config)
+
+        maintenance_url = f"postgresql+asyncpg://{username}:{password}@{host}:{port}/postgres"
 
         maintenance_engine = create_async_engine(maintenance_url)
         try:
@@ -68,11 +87,14 @@ class PostgresGraphDatasetDatabaseHandler:
         finally:
             await maintenance_engine.dispose()
 
-        dataset_url = _replace_database_in_url(base_url, db_name)
         engine = create_graph_engine(
             graph_database_provider="postgres",
             graph_file_path="",
-            graph_database_url=dataset_url,
+            graph_database_name=db_name,
+            graph_database_username=username,
+            graph_database_password=password,
+            graph_database_host=host,
+            graph_database_port=port,
         )
         await engine.initialize()
 
@@ -80,20 +102,35 @@ class PostgresGraphDatasetDatabaseHandler:
     async def resolve_dataset_connection_info(
         cls, dataset_database: DatasetDatabase
     ) -> DatasetDatabase:
+        # Credentials are never persisted in the DB; pull them from the live graph config.
+        graph_config = get_graph_config()
+        _, _, username, password = _resolve_pg_credentials(graph_config)
+        dataset_database.graph_database_connection_info["graph_database_username"] = username
+        dataset_database.graph_database_connection_info["graph_database_password"] = password
         return dataset_database
 
     @classmethod
     async def delete_dataset(cls, dataset_database: DatasetDatabase) -> None:
-        graph_url = dataset_database.graph_database_url
+        dataset_database = await cls.resolve_dataset_connection_info(dataset_database)
+
+        info = dataset_database.graph_database_connection_info
+        host = info.get("graph_database_host", "")
+        port = info.get("graph_database_port", "")
+        username = info.get("graph_database_username", "")
+        password = info.get("graph_database_password", "")
+        db_name = dataset_database.graph_database_name
 
         evict_graph_engine(
             graph_database_provider="postgres",
             graph_file_path="",
-            graph_database_url=graph_url,
+            graph_database_name=db_name,
+            graph_database_username=username,
+            graph_database_password=password,
+            graph_database_host=host,
+            graph_database_port=port,
         )
 
-        maintenance_url = _replace_database_in_url(graph_url, "postgres")
-        db_name = dataset_database.graph_database_name
+        maintenance_url = f"postgresql+asyncpg://{username}:{password}@{host}:{port}/postgres"
 
         maintenance_engine = create_async_engine(maintenance_url)
         try:
