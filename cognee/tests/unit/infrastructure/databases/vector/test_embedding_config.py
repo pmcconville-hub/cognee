@@ -53,15 +53,26 @@ def test_resolve_fastembed_uses_registry():
         assert _resolve_embedding_dimensions("fastembed", "BAAI/bge-large-en-v1.5") == 1024
 
 
-def test_config_auto_resolves_when_dimensions_unset():
+def _clear_embedding_env(monkeypatch):
+    # CI workflows set EMBEDDING_* env vars (see .github/workflows/basic_tests.yml),
+    # and pydantic-settings reads them at construction time — bypassing the
+    # class defaults and the auto-resolve path we want to test here.
+    for var in ("EMBEDDING_PROVIDER", "EMBEDDING_MODEL", "EMBEDDING_DIMENSIONS"):
+        monkeypatch.delenv(var, raising=False)
+
+
+def test_config_auto_resolves_when_dimensions_unset(monkeypatch):
     # Default config should still produce 3072 (the OpenAI default model).
-    cfg = EmbeddingConfig()
+    _clear_embedding_env(monkeypatch)
+    cfg = EmbeddingConfig(_env_file=None)
     assert cfg.embedding_dimensions == 3072
 
 
-def test_config_honors_explicit_dimensions():
+def test_config_honors_explicit_dimensions(monkeypatch):
     # Explicit override must win over auto-resolution.
+    _clear_embedding_env(monkeypatch)
     cfg = EmbeddingConfig(
+        _env_file=None,
         embedding_provider="fastembed",
         embedding_model="BAAI/bge-small-en-v1.5",
         embedding_dimensions=384,
@@ -69,10 +80,12 @@ def test_config_honors_explicit_dimensions():
     assert cfg.embedding_dimensions == 384
 
 
-def test_config_falls_back_when_unresolvable():
+def test_config_falls_back_when_unresolvable(monkeypatch):
     # Unknown model + unset dimensions falls back to 3072 with a warning,
     # so existing setups don't crash at import time.
+    _clear_embedding_env(monkeypatch)
     cfg = EmbeddingConfig(
+        _env_file=None,
         embedding_provider="openai",
         embedding_model="totally-fake-embedder-zzz",
         embedding_dimensions=None,
