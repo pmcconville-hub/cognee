@@ -34,6 +34,18 @@ def _make_skill_dir(slug: str = "code-review") -> Path:
 
 
 class TestSkillContract(unittest.TestCase):
+    def setUp(self) -> None:
+        # `set_database_global_context_variables` is a no-op when backend access
+        # control is off; with default Kuzu+LanceDB it auto-enables and then tries
+        # to look up the SimpleNamespace user in the relational DB. Disable it for
+        # the duration of each test in this class.
+        patcher = patch(
+            "cognee.context_global_variables.backend_access_control_enabled",
+            return_value=False,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_add_skills_persists_one_dataset_scoped_skill(self):
         from cognee.modules.engine.models import NodeSet
         from cognee.modules.tools.ingest_skills import add_skills
