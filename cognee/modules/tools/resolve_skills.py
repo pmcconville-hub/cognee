@@ -93,9 +93,9 @@ async def _load_skill_nodes(name: Optional[str] = None):
             return []
 
     get_nodeset = getattr(graph_engine, "get_nodeset_subgraph", None)
-    if get_nodeset is not None:
+    if get_nodeset is not None and name is not None:
         try:
-            nodes, _ = await get_nodeset(node_type=Skill, node_name=[name] if name else None)
+            nodes, _ = await get_nodeset(node_type=Skill, node_name=[name])
             if nodes:
                 return nodes
         except Exception as exc:
