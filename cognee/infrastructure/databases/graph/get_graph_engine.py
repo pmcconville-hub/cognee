@@ -53,21 +53,63 @@ def _normalize_optional_create_graph_engine_params(params: dict) -> dict:
     return normalized
 
 
+class _GraphEngineHandle:
+    """Stable reference to the current graph engine that survives cache invalidation.
+
+    Database engine instances are cached via ``closing_lru_cache``.  Several
+    operations invalidate that cache — ``prune_system`` calls ``cache_clear()``,
+    ``delete_dataset`` evicts individual entries, and the ``__aexit__`` of
+    ``set_database_global_context_variables`` evicts subprocess-mode engines to
+    release file locks.  When an entry is evicted the underlying adapter is
+    closed, so any direct proxy reference becomes a dead object that raises
+    "adapter is closed" on use.
+
+    This handle solves the problem by deferring resolution: every attribute
+    access calls ``create_graph_engine(**config)`` which either returns the
+    existing cached proxy (fast path) or transparently creates a fresh adapter
+    if the old one was evicted (recovery path).  Code that stores the return
+    value of ``get_graph_engine()`` — even across ``cognify``, ``search``,
+    ``prune``, or ``delete`` calls — always reaches a live adapter without
+    needing to re-call ``get_graph_engine()``.
+
+    For adapters that expose ``initialize()`` (Postgres, Neo4j), the handle
+    tracks which engine proxy was last initialized and re-runs the idempotent
+    schema setup when the underlying engine changes.
+    """
+
+    __slots__ = ("_config", "_last_initialized_id")
+
+    def __init__(self, config: dict):
+        object.__setattr__(self, "_config", config)
+        object.__setattr__(self, "_last_initialized_id", None)
+
+    def _engine(self):
+        return create_graph_engine(**self._config)
+
+    async def _ensure_initialized(self):
+        engine = self._engine()
+        engine_id = id(engine)
+        if engine_id != self._last_initialized_id and hasattr(engine, "initialize"):
+            await engine.initialize()
+        object.__setattr__(self, "_last_initialized_id", engine_id)
+
+    @property
+    def __class__(self):
+        return self._engine().__class__
+
+    def __getattr__(self, name):
+        return getattr(self._engine(), name)
+
+    def __repr__(self):
+        return f"<GraphEngineHandle config={self._config!r}>"
+
+
 async def get_graph_engine() -> GraphDBInterface:
     """Factory function to get the appropriate graph client based on the graph type."""
-    # Get appropriate graph configuration based on current async context
     config = get_graph_context_config()
-
-    graph_client = create_graph_engine(**config)
-
-    # Async functions can't be cached. After creating and caching the graph engine
-    # handle all necessary async operations for different graph types bellow.
-
-    # Run any adapter‐specific async initialization
-    if hasattr(graph_client, "initialize"):
-        await graph_client.initialize()
-
-    return graph_client
+    handle = _GraphEngineHandle(config)
+    await handle._ensure_initialized()
+    return handle
 
 
 def create_graph_engine(
@@ -155,6 +197,29 @@ def evict_graph_engine(**kwargs) -> bool:
     normalized = _normalize_optional_create_graph_engine_params(kwargs)
     provider = _normalize_graph_database_provider(kwargs.get("graph_database_provider"))
     return _create_graph_engine.cache_evict(
+        provider,
+        kwargs.get("graph_file_path"),
+        normalized["graph_database_url"],
+        normalized["graph_database_name"],
+        normalized["graph_database_username"],
+        normalized["graph_database_password"],
+        normalized["graph_database_host"],
+        normalized["graph_database_allow_anonymous"],
+        normalized["graph_database_port"],
+        normalized["graph_database_key"],
+        normalized["graph_dataset_database_handler"],
+        normalized["graph_database_subprocess_enabled"],
+        normalized["kuzu_num_threads"],
+        normalized["kuzu_buffer_pool_size"],
+        normalized["kuzu_max_db_size"],
+    )
+
+
+def is_graph_engine_cached(**kwargs) -> bool:
+    """Check whether a graph engine entry exists in the cache without creating."""
+    normalized = _normalize_optional_create_graph_engine_params(kwargs)
+    provider = _normalize_graph_database_provider(kwargs.get("graph_database_provider"))
+    return _create_graph_engine.cache_contains(
         provider,
         kwargs.get("graph_file_path"),
         normalized["graph_database_url"],
