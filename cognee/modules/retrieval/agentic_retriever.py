@@ -299,7 +299,11 @@ class AgenticRetriever(GraphCompletionRetriever):
     ) -> None:
         """Persist one SkillRun node per active skill after a retrieval call."""
         from cognee.modules.engine.models import NodeSet
-        from cognee.modules.engine.models.SkillRun import SkillRun, UNSCORED_SKILL_RUN_SCORE
+        from cognee.modules.engine.models.SkillRun import (
+            CandidateSkill,
+            SkillRun,
+            UNSCORED_SKILL_RUN_SCORE,
+        )
         from cognee.modules.engine.utils.generate_node_id import generate_node_id
         from cognee.modules.pipelines.models import PipelineContext
         from cognee.tasks.storage.add_data_points import add_data_points
@@ -314,6 +318,14 @@ class AgenticRetriever(GraphCompletionRetriever):
                 selected_skill_id=str(s.id),
                 selected_skill_name=s.name,
                 selected_skill=s,
+                candidate_skills=[
+                    CandidateSkill(
+                        skill_id=str(s.id),
+                        skill_name=s.name,
+                        skill_description=s.description,
+                        skill_text=s.skill_text or s.search_text,
+                    )
+                ],
                 dataset_scope=dataset_scope,
                 task_text=task_text,
                 success_score=resolved_score,

@@ -53,6 +53,19 @@ def _coerce_tool_trace(raw_trace: list[dict]) -> list[ToolCall]:
     return calls
 
 
+def _candidate_skill_for_id(skill_id: str, selected_skill) -> CandidateSkill:
+    is_selected = str(skill_id) == str(selected_skill.id)
+    if not is_selected:
+        return CandidateSkill(skill_id=str(skill_id))
+
+    return CandidateSkill(
+        skill_id=str(selected_skill.id),
+        skill_name=selected_skill.name,
+        skill_description=selected_skill.description,
+        skill_text=selected_skill.skill_text or selected_skill.search_text,
+    )
+
+
 async def remember_skill_run_entry(
     entry: SkillRunEntry,
     *,
@@ -100,13 +113,7 @@ async def remember_skill_run_entry(
             success_score=success_score,
             session_id=session_id or "agentic",
             candidate_skills=[
-                CandidateSkill(
-                    skill_id=str(skill_id),
-                    skill_name=(
-                        selected_skill.name if str(skill_id) == str(selected_skill.id) else ""
-                    ),
-                )
-                for skill_id in candidate_ids
+                _candidate_skill_for_id(skill_id, selected_skill) for skill_id in candidate_ids
             ],
             task_pattern_id=entry.task_pattern_id,
             router_version=entry.router_version,

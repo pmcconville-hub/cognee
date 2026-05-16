@@ -19,6 +19,7 @@ class Skill(DataPoint):
     dataset_scope: List[str] = Field(default_factory=list)
     is_active: bool = True
 
+    skill_text: str = ""
     search_text: Annotated[str, Embeddable(), LLMContext()] = ""
 
     metadata: dict = Field(

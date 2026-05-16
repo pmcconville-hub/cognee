@@ -58,6 +58,7 @@ class TestSkillContract(unittest.TestCase):
             assert skill.belongs_to_set[0].name == "skills"
             assert skill.content_hash
             assert "Review code changes" in skill.search_text
+            assert skill.skill_text == skill.search_text
             assert mock_add.await_count == 1
             assert mock_add.await_args.kwargs["ctx"].dataset is dataset
         finally:
@@ -202,6 +203,8 @@ class TestSkillContract(unittest.TestCase):
         skill = Skill(
             name="code-review",
             description="Review code.",
+            skill_text="code-review\n\nReview code.",
+            search_text="code-review\n\nReview code.",
             dataset_scope=[str(dataset.id)],
         )
         add_data_points_module = importlib.import_module("cognee.tasks.storage.add_data_points")
@@ -223,6 +226,10 @@ class TestSkillContract(unittest.TestCase):
         run = mock_add.await_args.args[0][0]
         assert run.selected_skill_id == str(skill.id)
         assert run.selected_skill_name == "code-review"
+        assert run.candidate_skills[0].skill_name == "code-review"
+        assert run.candidate_skills[0].skill_description == "Review code."
+        assert run.candidate_skills[0].skill_text == skill.skill_text
+        assert run.candidate_skills[0].metadata["index_fields"] == ["skill_description"]
         assert run.dataset_scope == [str(dataset.id)]
         assert run.session_id == "session-1"
         assert run.success_score == UNSCORED_SKILL_RUN_SCORE
@@ -236,7 +243,12 @@ class TestSkillContract(unittest.TestCase):
         dataset = SimpleNamespace(id=uuid4(), name="project")
         user = SimpleNamespace(id=uuid4(), tenant_id=uuid4())
         skill = Skill(
-            name="code-review", description="Review code.", dataset_scope=[str(dataset.id)]
+            name="code-review",
+            description="Review code.",
+            procedure="step 1",
+            skill_text="code-review\n\nReview code.\n\nstep 1",
+            search_text="code-review\n\nReview code.\n\nstep 1",
+            dataset_scope=[str(dataset.id)],
         )
         entry = SkillRunEntry(
             run_id="run-1",
@@ -277,6 +289,11 @@ class TestSkillContract(unittest.TestCase):
         assert run.selected_skill_id == str(skill.id)
         assert run.selected_skill_name == "code-review"
         assert run.selected_skill is skill
+        assert run.candidate_skills[0].skill_id == str(skill.id)
+        assert run.candidate_skills[0].skill_name == "code-review"
+        assert run.candidate_skills[0].skill_description == "Review code."
+        assert "step 1" in run.candidate_skills[0].skill_text
+        assert run.candidate_skills[0].metadata["index_fields"] == ["skill_description"]
         assert run.dataset_scope == [str(dataset.id)]
         assert run.belongs_to_set[0].name == "skills"
         assert mock_add.await_args.kwargs["ctx"].dataset is dataset
@@ -333,7 +350,7 @@ class TestSkillContract(unittest.TestCase):
         proposal, mock_add = _run(create_proposal())
         assert skill.procedure == "old"
         assert proposal.old_procedure == "old"
-        assert proposal.proposed_procedure == "new"
+        assert proposal.proposed_procedure == "# code-review\n\nnew"
         assert proposal.runs_used == ["run-1"]
         assert proposal.skill is skill
         assert proposal.runs == [run]
@@ -391,6 +408,52 @@ class TestSkillContract(unittest.TestCase):
                 return applied, mock_add
 
         applied, mock_add = _run(apply_proposal())
-        assert skill.procedure == "new"
+        assert skill.procedure == "# code-review\n\nnew"
+        assert skill.skill_text == "code-review\n\nReview code.\n\n# code-review\n\nnew"
+        assert skill.search_text == skill.skill_text
         assert applied.status == "applied"
         assert mock_add.await_args.args[0] == [skill, proposal]
+
+    def test_skill_improvement_apply_preserves_existing_skill_body_heading(self):
+        from cognee.modules.engine.models import Skill, SkillImprovementProposal
+        from cognee.modules.memify.skill_improvement import improve_skill
+
+        dataset = SimpleNamespace(id=uuid4(), name="project")
+        user = SimpleNamespace(id=uuid4(), tenant_id=uuid4())
+        skill = Skill(name="code-review", description="Review code.", procedure="old")
+        proposal = SkillImprovementProposal(
+            proposal_id="proposal-1",
+            skill_id=str(skill.id),
+            skill_name=skill.name,
+            dataset_scope=[str(dataset.id)],
+            old_procedure="old",
+            proposed_procedure="# code-review\n\n- Read the diff.",
+        )
+
+        async def apply_proposal():
+            with (
+                patch(
+                    "cognee.modules.memify.skill_improvement._find_proposal",
+                    new_callable=AsyncMock,
+                    return_value=proposal,
+                ),
+                patch(
+                    "cognee.modules.memify.skill_improvement.find_skill_by_id",
+                    new_callable=AsyncMock,
+                    return_value=skill,
+                ),
+                patch(
+                    "cognee.modules.memify.skill_improvement.add_data_points",
+                    new_callable=AsyncMock,
+                ),
+            ):
+                return await improve_skill(
+                    "code-review",
+                    dataset=dataset,
+                    user=user,
+                    proposal_id="proposal-1",
+                    apply=True,
+                )
+
+        _run(apply_proposal())
+        assert skill.procedure == "# code-review\n\n- Read the diff."

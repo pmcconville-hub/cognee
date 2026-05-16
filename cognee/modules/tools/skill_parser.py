@@ -128,6 +128,7 @@ def parse_skill_file(
     declared_tools = _extract_tools(frontmatter)
     source_file = _normalize_path(skill_md)
     source_dir = _normalize_path(skill_md.parent)
+    skill_text = _build_search_text(name, description, body)
 
     return Skill(
         id=_deterministic_id(f"skill:{source_dir}:{name}"),
@@ -138,7 +139,8 @@ def parse_skill_file(
         source_file=source_file,
         source_dir=source_dir,
         content_hash=_content_hash(raw_text),
-        search_text=_build_search_text(name, description, body),
+        skill_text=skill_text,
+        search_text=skill_text,
         belongs_to_set=["skills"],
     )
 

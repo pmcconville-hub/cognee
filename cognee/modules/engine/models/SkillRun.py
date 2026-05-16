@@ -23,9 +23,11 @@ class CandidateSkill(DataPoint):
 
     skill_id: str
     skill_name: str = ""
+    skill_description: str = ""
+    skill_text: str = ""
     score: float = 0.0
     signals: Optional[Dict[str, Any]] = None
-    metadata: dict = {"index_fields": []}
+    metadata: dict = {"index_fields": ["skill_description"]}
 
 
 class SkillRun(DataPoint):

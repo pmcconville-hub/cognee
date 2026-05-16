@@ -152,10 +152,12 @@ async def add_skills(
         skill.id = _scoped_skill_id(dataset_id, skill)
         skill.dataset_scope = [str(dataset_id)]
         skill.belongs_to_set = [node_set_point]
-        if not skill.search_text:
-            skill.search_text = "\n\n".join(
+        if not skill.skill_text:
+            skill.skill_text = "\n\n".join(
                 part for part in (skill.name, skill.description, skill.procedure) if part
             )
+        if not skill.search_text:
+            skill.search_text = skill.skill_text
         scoped.append(skill)
 
     await add_data_points(scoped, ctx=_make_storage_context(user, dataset, path))

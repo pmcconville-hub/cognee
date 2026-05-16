@@ -47,6 +47,13 @@ def _storage_context(user, dataset, key: str) -> Optional[PipelineContext]:
     )
 
 
+def _format_skill_procedure(skill_name: str, procedure: str) -> str:
+    procedure = (procedure or "").strip()
+    if procedure.startswith("#"):
+        return procedure
+    return f"# {skill_name}\n\n{procedure}".strip()
+
+
 async def improve_skill_from_config(
     config: dict[str, Any],
     *,
@@ -139,7 +146,7 @@ async def improve_skill(
             skill=skill,
             dataset_scope=_dataset_scope(dataset),
             old_procedure=skill.procedure,
-            proposed_procedure=draft.proposed_procedure,
+            proposed_procedure=_format_skill_procedure(skill.name, draft.proposed_procedure),
             runs_used=[run.run_id for run in runs],
             runs=runs,
             model_name=model_name,
@@ -174,10 +181,11 @@ async def _apply_proposal(
             f"Skill {proposal.skill_name!r} was not found in dataset {dataset.name!r}."
         )
 
-    skill.procedure = proposal.proposed_procedure
-    skill.search_text = "\n\n".join(
+    skill.procedure = _format_skill_procedure(skill.name, proposal.proposed_procedure)
+    skill.skill_text = "\n\n".join(
         part for part in (skill.name, skill.description, skill.procedure) if part
     )
+    skill.search_text = skill.skill_text
     skill.belongs_to_set = [_skills_node_set()]
     proposal.status = "applied"
     proposal.belongs_to_set = [_skills_node_set()]
@@ -202,7 +210,12 @@ async def _generate_proposal(skill: Skill, runs: list[SkillRun]) -> SkillImprove
         f"# Current Procedure\n{skill.procedure}\n\n# Failure Evidence\n{run_context}"
     )
     return await generate_completion(
-        query="Propose a revised skill procedure. Do not mutate state.",
+        query=(
+            "Propose a revised skill procedure. Return proposed_procedure as a complete "
+            f"SKILL.md body that starts with '# {skill.name}'. Write direct instructions "
+            "for the agent to follow, not prose about what the skill should do. "
+            "Do not mutate state."
+        ),
         context=context,
         user_prompt_path="context_for_question.txt",
         system_prompt_path="answer_simple_question.txt",
