@@ -52,7 +52,7 @@ async def index_data_points(data_points: list[DataPoint], vector_engine=None):
             data_points_by_type[type_name][field_name].append(indexed_data_point)
 
     BATCH_SIZE = 25
-    semaphore = asyncio.Semaphore(5)
+    semaphore = asyncio.Semaphore(4)
 
     async def _index_batch(type_name, field_name, batch):
         async with semaphore:
