@@ -53,21 +53,48 @@ def _normalize_optional_create_graph_engine_params(params: dict) -> dict:
     return normalized
 
 
+class _GraphEngineHandle:
+    """Auto-refreshing handle that re-resolves through the cache on every access.
+
+    If the cached engine was closed (e.g. by ``__aexit__``, ``prune_system``,
+    or ``cache_clear``), the next attribute access transparently gets a fresh
+    one from the cache.  Callers can hold a reference across eviction
+    boundaries without hitting "adapter is closed" errors.
+
+    For adapters that expose ``initialize()`` (Postgres, Neo4j), the handle
+    tracks which proxy was last initialized and re-initializes when the
+    underlying engine changes.
+    """
+
+    __slots__ = ("_config", "_last_initialized_id")
+
+    def __init__(self, config: dict):
+        object.__setattr__(self, "_config", config)
+        object.__setattr__(self, "_last_initialized_id", None)
+
+    def _engine(self):
+        return create_graph_engine(**self._config)
+
+    async def _ensure_initialized(self):
+        engine = self._engine()
+        engine_id = id(engine)
+        if engine_id != self._last_initialized_id and hasattr(engine, "initialize"):
+            await engine.initialize()
+        object.__setattr__(self, "_last_initialized_id", engine_id)
+
+    def __getattr__(self, name):
+        return getattr(self._engine(), name)
+
+    def __repr__(self):
+        return f"<GraphEngineHandle config={self._config!r}>"
+
+
 async def get_graph_engine() -> GraphDBInterface:
     """Factory function to get the appropriate graph client based on the graph type."""
-    # Get appropriate graph configuration based on current async context
     config = get_graph_context_config()
-
-    graph_client = create_graph_engine(**config)
-
-    # Async functions can't be cached. After creating and caching the graph engine
-    # handle all necessary async operations for different graph types bellow.
-
-    # Run any adapter‐specific async initialization
-    if hasattr(graph_client, "initialize"):
-        await graph_client.initialize()
-
-    return graph_client
+    handle = _GraphEngineHandle(config)
+    await handle._ensure_initialized()
+    return handle
 
 
 def create_graph_engine(

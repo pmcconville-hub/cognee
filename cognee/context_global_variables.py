@@ -252,7 +252,8 @@ class DatabaseContextManager:
             if is_graph_engine_cached(**g_cfg):
                 engine = create_graph_engine(**g_cfg)
                 evict_graph_engine(**g_cfg)
-                await engine.close()
+                if hasattr(engine, "close"):
+                    await engine.close()
 
         v_cfg = get_vectordb_context_config()
         if v_cfg.get("vector_db_subprocess_enabled"):
@@ -265,7 +266,8 @@ class DatabaseContextManager:
             if is_vector_engine_cached(**v_cfg):
                 engine = create_vector_engine(**v_cfg)
                 evict_vector_engine(**v_cfg)
-                await engine.close()
+                if hasattr(engine, "close"):
+                    await engine.close()
 
         from cognee.infrastructure.databases.dataset_queue import dataset_queue
 
