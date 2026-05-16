@@ -3,12 +3,23 @@ from .create_vector_engine import create_vector_engine
 
 
 class _VectorEngineHandle:
-    """Auto-refreshing handle that re-resolves through the cache on every access.
+    """Stable reference to the current vector engine that survives cache invalidation.
 
-    If the cached engine was closed (e.g. by ``prune_system`` or
-    ``cache_clear``), the next attribute access transparently gets a
-    fresh one from the cache.  Callers can hold a reference across
-    prune boundaries without hitting "adapter is closed" errors.
+    Database engine instances are cached via ``closing_lru_cache``.  Several
+    operations invalidate that cache — ``prune_system`` calls ``cache_clear()``,
+    ``delete_dataset`` evicts individual entries, and the ``__aexit__`` of
+    ``set_database_global_context_variables`` evicts subprocess-mode engines to
+    release file locks.  When an entry is evicted the underlying adapter is
+    closed, so any direct proxy reference becomes a dead object that raises
+    "adapter is closed" on use.
+
+    This handle solves the problem by deferring resolution: every attribute
+    access calls ``create_vector_engine(**config)`` which either returns the
+    existing cached proxy (fast path) or transparently creates a fresh adapter
+    if the old one was evicted (recovery path).  Code that stores the return
+    value of ``get_vector_engine()`` — even across ``cognify``, ``search``,
+    ``prune``, or ``delete`` calls — always reaches a live adapter without
+    needing to re-call ``get_vector_engine()``.
     """
 
     __slots__ = ("_config",)
