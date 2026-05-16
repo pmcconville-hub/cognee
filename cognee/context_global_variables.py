@@ -232,15 +232,23 @@ class DatabaseContextManager:
         if not backend_access_control_enabled():
             return None
 
-        # Evict this dataset's engine entries from the LRU caches before
-        # releasing the queue slot. This guarantees the freed slot and the
-        # freed cache entry are the same dataset, so the LRU never evicts
-        # a still-active dataset's adapter to make room for a new one.
-        from cognee.infrastructure.databases.graph.get_graph_engine import evict_graph_engine
-        from cognee.infrastructure.databases.vector.create_vector_engine import evict_vector_engine
+        # In subprocess mode each adapter's child process holds an
+        # exclusive flock() on the DB file. Proactively evict this
+        # dataset's adapters so the LRU never evicts a still-active
+        # dataset's adapter whose subprocess still holds the lock.
+        g_cfg = get_graph_context_config()
+        if g_cfg.get("graph_database_subprocess_enabled"):
+            from cognee.infrastructure.databases.graph.get_graph_engine import evict_graph_engine
 
-        evict_graph_engine(**get_graph_context_config())
-        evict_vector_engine(**get_vectordb_context_config())
+            evict_graph_engine(**g_cfg)
+
+        v_cfg = get_vectordb_context_config()
+        if v_cfg.get("vector_db_subprocess_enabled"):
+            from cognee.infrastructure.databases.vector.create_vector_engine import (
+                evict_vector_engine,
+            )
+
+            evict_vector_engine(**v_cfg)
 
         from cognee.infrastructure.databases.dataset_queue import dataset_queue
 
