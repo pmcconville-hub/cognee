@@ -35,8 +35,10 @@ from cognee.modules.observability.tracing import (
 
 logger = get_logger()
 
-DEFAULT_KUZU_BUFFER_POOL_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB
-DEFAULT_KUZU_MAX_DB_SIZE = 4 * 1024 * 1024 * 1024  # 4 GB
+# DEFAULT_KUZU_BUFFER_POOL_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB
+# DEFAULT_KUZU_MAX_DB_SIZE = 4 * 1024 * 1024 * 1024  # 4 GB
+DEFAULT_KUZU_BUFFER_POOL_SIZE = 0  # Remove limit on cache and DB size
+DEFAULT_KUZU_MAX_DB_SIZE = 1 << 30  # Default value used by Ladybug/Kuzu
 
 
 cache_config = get_cache_config()
