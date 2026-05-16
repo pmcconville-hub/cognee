@@ -122,7 +122,7 @@ class FastembedEmbeddingEngine(EmbeddingEngine):
                         parallel=None,
                     )
 
-                embeddings = list(embeddings)
+                embeddings = [e.tolist() for e in embeddings]
 
         except Exception as error:
             error_str = str(error).lower()
