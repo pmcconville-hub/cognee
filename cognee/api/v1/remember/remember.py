@@ -777,6 +777,7 @@ async def _remember_inner(
         )
 
     if content_type == "skills":
+        from cognee.context_global_variables import set_database_global_context_variables
         from cognee.modules.engine.operations.setup import setup
         from cognee.modules.tools import add_skills
 
@@ -789,13 +790,17 @@ async def _remember_inner(
         dataset = authorized_datasets[0]
 
         skills_node_set = _requested_node_set("skills")
+        owner_id = getattr(dataset, "owner_id", None) or getattr(user, "id", None)
+        if owner_id is None:
+            raise ValueError("Skill ingestion requires a dataset owner or user.")
 
-        skills = await add_skills(
-            data,
-            node_set=skills_node_set,
-            user=user,
-            dataset=dataset,
-        )
+        async with set_database_global_context_variables(dataset.id, owner_id):
+            skills = await add_skills(
+                data,
+                node_set=skills_node_set,
+                user=user,
+                dataset=dataset,
+            )
         result = RememberResult(
             status="completed",
             dataset_name=dataset.name,

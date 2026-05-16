@@ -28,6 +28,7 @@ warnings.filterwarnings("ignore", message="This declarative base already contain
 
 import cognee
 from cognee import SearchType
+from cognee.context_global_variables import set_database_global_context_variables
 from cognee.memory import SkillRunEntry
 from cognee.modules.engine.operations.setup import setup
 from cognee.modules.memify.skill_improvement import improve_skill
@@ -68,8 +69,16 @@ Reviewer comment:
 """
 
 
+def _unwrap_answer(answer: Any) -> Any:
+    if isinstance(answer, list) and answer:
+        return _unwrap_answer(answer[0])
+    if isinstance(answer, dict) and "search_result" in answer:
+        return _unwrap_answer(answer["search_result"])
+    return answer
+
+
 def parse_json_answer(answer: Any) -> dict[str, Any]:
-    text = answer[0] if isinstance(answer, list) else answer
+    text = _unwrap_answer(answer)
     if not isinstance(text, str):
         raise ValueError(f"Expected string answer, got {type(text).__name__}")
 
@@ -100,8 +109,12 @@ def feedback_summary(feedback: dict[str, Any]) -> str:
     )
 
 
-async def skill_body(skill_name: str, dataset_id: UUID) -> str:
-    skill = await find_skill_by_name(skill_name, dataset_id=dataset_id)
+async def skill_body(skill_name: str, dataset, user) -> str:
+    owner_id = getattr(dataset, "owner_id", None) or getattr(user, "id", None)
+    if owner_id is None:
+        raise ValueError("skill_body requires a dataset owner or user id.")
+    async with set_database_global_context_variables(dataset.id, owner_id):
+        skill = await find_skill_by_name(skill_name, dataset_id=dataset.id)
     if skill is None:
         raise ValueError(f"Skill {skill_name!r} was not found.")
     return skill.procedure.strip()
@@ -118,8 +131,7 @@ async def main() -> None:
         content_type="skills",
     )
     print(f"1. remember -> stored {remembered.items_processed} skills")
-    dataset_id = UUID(remembered.dataset_id)
-    user, datasets = await resolve_authorized_user_datasets(dataset_id)
+    user, datasets = await resolve_authorized_user_datasets(UUID(remembered.dataset_id))
     dataset = datasets[0]
 
     task = TASK_TEMPLATE.format(
@@ -160,7 +172,7 @@ async def main() -> None:
         for item in proposal_result.items
         if item.get("kind") == "skill_improvement_proposal"
     )
-    before = await skill_body(skill_to_improve, dataset_id)
+    before = await skill_body(skill_to_improve, dataset, user)
     await improve_skill(
         skill_to_improve,
         dataset=dataset,
@@ -168,7 +180,7 @@ async def main() -> None:
         proposal_id=proposal_id,
         apply=True,
     )
-    after = await skill_body(skill_to_improve, dataset_id)
+    after = await skill_body(skill_to_improve, dataset, user)
     print(f"3. improve proposal -> applied proposal_id={proposal_id}")
     print(f"4. skill before -> {one_line(before)}")
     print(f"5. skill after -> {one_line(after)}")
