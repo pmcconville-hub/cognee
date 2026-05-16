@@ -35,8 +35,8 @@ from cognee.modules.observability.tracing import (
 
 logger = get_logger()
 
-DEFAULT_KUZU_BUFFER_POOL_SIZE = 20 * 1024 * 1024 * 1024  # 20 GB
-DEFAULT_KUZU_MAX_DB_SIZE = 20 * 1024 * 1024 * 1024  # 20 GB
+DEFAULT_KUZU_BUFFER_POOL_SIZE = 1 << 35  # 32 GB (must be a power of 2 for Kuzu)
+DEFAULT_KUZU_MAX_DB_SIZE = 1 << 35  # 32 GB (must be a power of 2 for Kuzu)
 
 
 cache_config = get_cache_config()
