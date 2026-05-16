@@ -173,6 +173,29 @@ def evict_graph_engine(**kwargs) -> bool:
     )
 
 
+def is_graph_engine_cached(**kwargs) -> bool:
+    """Check whether a graph engine entry exists in the cache without creating."""
+    normalized = _normalize_optional_create_graph_engine_params(kwargs)
+    provider = _normalize_graph_database_provider(kwargs.get("graph_database_provider"))
+    return _create_graph_engine.cache_contains(
+        provider,
+        kwargs.get("graph_file_path"),
+        normalized["graph_database_url"],
+        normalized["graph_database_name"],
+        normalized["graph_database_username"],
+        normalized["graph_database_password"],
+        normalized["graph_database_host"],
+        normalized["graph_database_allow_anonymous"],
+        normalized["graph_database_port"],
+        normalized["graph_database_key"],
+        normalized["graph_dataset_database_handler"],
+        normalized["graph_database_subprocess_enabled"],
+        normalized["kuzu_num_threads"],
+        normalized["kuzu_buffer_pool_size"],
+        normalized["kuzu_max_db_size"],
+    )
+
+
 @closing_lru_cache(maxsize=DATABASE_MAX_LRU_CACHE_SIZE)
 def _create_graph_engine(
     graph_database_provider,

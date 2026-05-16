@@ -130,6 +130,23 @@ def evict_vector_engine(**kwargs) -> bool:
     )
 
 
+def is_vector_engine_cached(**kwargs) -> bool:
+    """Check whether a vector engine entry exists in the cache without creating."""
+    normalized = _normalize_optional_create_vector_engine_params(kwargs)
+    return _create_vector_engine.cache_contains(
+        kwargs.get("vector_db_provider", ""),
+        kwargs.get("vector_db_url", ""),
+        kwargs.get("vector_db_name", ""),
+        normalized["vector_db_port"],
+        normalized["vector_db_key"],
+        normalized["vector_dataset_database_handler"],
+        normalized["vector_db_username"],
+        normalized["vector_db_password"],
+        normalized["vector_db_host"],
+        normalized["vector_db_subprocess_enabled"],
+    )
+
+
 @closing_lru_cache(maxsize=DATABASE_MAX_LRU_CACHE_SIZE)
 def _create_vector_engine(
     vector_db_provider: str,

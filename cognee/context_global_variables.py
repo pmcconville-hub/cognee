@@ -233,30 +233,39 @@ class DatabaseContextManager:
             return None
 
         # In subprocess mode each adapter's child process holds an
-        # exclusive flock() on the DB file. Evict and **await** close so
+        # exclusive flock() on the DB file. Evict and await close() so
         # the subprocess fully releases the lock before the next caller
         # tries to open the same database file.
+        #
+        # Check the cache *before* calling create — if the entry was
+        # already removed (e.g. by delete_dataset), calling create
+        # would manufacture a new adapter that re-creates the deleted
+        # database on disk.
         g_cfg = get_graph_context_config()
         if g_cfg.get("graph_database_subprocess_enabled"):
             from cognee.infrastructure.databases.graph.get_graph_engine import (
                 create_graph_engine,
                 evict_graph_engine,
+                is_graph_engine_cached,
             )
 
-            engine = create_graph_engine(**g_cfg)
-            evict_graph_engine(**g_cfg)
-            await engine.close()
+            if is_graph_engine_cached(**g_cfg):
+                engine = create_graph_engine(**g_cfg)
+                evict_graph_engine(**g_cfg)
+                await engine.close()
 
         v_cfg = get_vectordb_context_config()
         if v_cfg.get("vector_db_subprocess_enabled"):
             from cognee.infrastructure.databases.vector.create_vector_engine import (
                 create_vector_engine,
                 evict_vector_engine,
+                is_vector_engine_cached,
             )
 
-            engine = create_vector_engine(**v_cfg)
-            evict_vector_engine(**v_cfg)
-            await engine.close()
+            if is_vector_engine_cached(**v_cfg):
+                engine = create_vector_engine(**v_cfg)
+                evict_vector_engine(**v_cfg)
+                await engine.close()
 
         from cognee.infrastructure.databases.dataset_queue import dataset_queue
 
