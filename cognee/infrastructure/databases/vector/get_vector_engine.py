@@ -30,6 +30,10 @@ class _VectorEngineHandle:
     def _engine(self):
         return create_vector_engine(**self._config)
 
+    @property
+    def __class__(self):
+        return self._engine().__class__
+
     def __getattr__(self, name):
         return getattr(self._engine(), name)
 

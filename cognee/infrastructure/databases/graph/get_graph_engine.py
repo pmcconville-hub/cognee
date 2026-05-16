@@ -93,6 +93,10 @@ class _GraphEngineHandle:
             await engine.initialize()
         object.__setattr__(self, "_last_initialized_id", engine_id)
 
+    @property
+    def __class__(self):
+        return self._engine().__class__
+
     def __getattr__(self, name):
         return getattr(self._engine(), name)
 
