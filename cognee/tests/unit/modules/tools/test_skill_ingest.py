@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -34,6 +35,7 @@ def _make_skill_dir(slug: str = "code-review") -> Path:
 
 class TestSkillContract(unittest.TestCase):
     def test_add_skills_persists_one_dataset_scoped_skill(self):
+        from cognee.modules.engine.models import NodeSet
         from cognee.modules.tools.ingest_skills import add_skills
 
         root = _make_skill_dir()
@@ -52,6 +54,8 @@ class TestSkillContract(unittest.TestCase):
             assert skill.dataset_scope == [str(dataset.id)]
             assert skill.source_file.endswith("code-review/SKILL.md")
             assert skill.source_dir.endswith("code-review")
+            assert isinstance(skill.belongs_to_set[0], NodeSet)
+            assert skill.belongs_to_set[0].name == "skills"
             assert skill.content_hash
             assert "Review code changes" in skill.search_text
             assert mock_add.await_count == 1
@@ -127,6 +131,42 @@ class TestSkillContract(unittest.TestCase):
                 )
             )
 
+    def test_agentic_retriever_skips_memory_retrieval_when_graph_has_no_edges(self):
+        from cognee.modules.retrieval.agentic_retriever import AgenticRetriever
+        from cognee.modules.retrieval.graph_completion_retriever import GraphCompletionRetriever
+
+        dataset = SimpleNamespace(id=uuid4(), name="project")
+        user = SimpleNamespace(id=uuid4())
+        retriever = AgenticRetriever(skills=["code-review"], user=user, dataset=dataset)
+
+        async def run_retrieval():
+            with (
+                patch.object(AgenticRetriever, "_graph_has_edges", new_callable=AsyncMock) as edges,
+                patch(
+                    "cognee.modules.retrieval.agentic_retriever.resolve_skills",
+                    new_callable=AsyncMock,
+                    return_value=[],
+                ),
+                patch(
+                    "cognee.modules.retrieval.agentic_retriever.list_tools_for_dataset",
+                    new_callable=AsyncMock,
+                    return_value=[],
+                ),
+                patch.object(
+                    GraphCompletionRetriever,
+                    "get_retrieved_objects",
+                    new_callable=AsyncMock,
+                ) as parent_retrieval,
+            ):
+                edges.return_value = False
+                result = await retriever.get_retrieved_objects(query="review this")
+                return result, parent_retrieval
+
+        result, parent_retrieval = _run(run_retrieval())
+
+        assert result["triplets"] == []
+        parent_retrieval.assert_not_awaited()
+
     def test_load_skill_loads_only_active_context_skills(self):
         from cognee.modules.engine.models import Skill
         from cognee.modules.tools.builtin.load_skill import handler
@@ -164,10 +204,10 @@ class TestSkillContract(unittest.TestCase):
             description="Review code.",
             dataset_scope=[str(dataset.id)],
         )
+        add_data_points_module = importlib.import_module("cognee.tasks.storage.add_data_points")
 
-        with patch(
-            "cognee.tasks.storage.add_data_points.add_data_points",
-            new_callable=AsyncMock,
+        with patch.object(
+            add_data_points_module, "add_data_points", new_callable=AsyncMock
         ) as mock_add:
             _run(
                 AgenticRetriever._record_skill_runs(
@@ -236,6 +276,7 @@ class TestSkillContract(unittest.TestCase):
         assert resolved_dataset is dataset
         assert run.selected_skill_id == str(skill.id)
         assert run.selected_skill_name == "code-review"
+        assert run.selected_skill is skill
         assert run.dataset_scope == [str(dataset.id)]
         assert run.belongs_to_set[0].name == "skills"
         assert mock_add.await_args.kwargs["ctx"].dataset is dataset
@@ -294,7 +335,10 @@ class TestSkillContract(unittest.TestCase):
         assert proposal.old_procedure == "old"
         assert proposal.proposed_procedure == "new"
         assert proposal.runs_used == ["run-1"]
+        assert proposal.skill is skill
+        assert proposal.runs == [run]
         assert proposal.dataset_scope == [str(dataset.id)]
+        assert proposal.belongs_to_set[0].name == "skills"
         assert mock_add.await_args.args[0][0] is proposal
 
     def test_skill_improvement_apply_requires_existing_proposal_id(self):

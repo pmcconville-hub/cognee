@@ -7,6 +7,7 @@ from typing import Optional
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from cognee.memory.entries import SkillRunEntry
+from cognee.context_global_variables import set_database_global_context_variables
 from cognee.modules.engine.models import (
     CandidateSkill,
     NodeSet,
@@ -70,46 +71,56 @@ async def remember_skill_run_entry(
     user, authorized_datasets = await resolve_authorized_user_datasets(dataset_name, user)
     dataset = authorized_datasets[0]
 
-    resolved_skills = await resolve_skills([entry.selected_skill_id], dataset_id=dataset.id)
-    if not resolved_skills:
-        raise ValueError(
-            f"Skill '{entry.selected_skill_id}' was not found or is not visible "
-            f"in dataset '{dataset.name}'"
+    owner_id = getattr(dataset, "owner_id", None) or getattr(user, "id", None)
+    if owner_id is None:
+        raise ValueError("SkillRun persistence requires a dataset owner or user.")
+
+    async with set_database_global_context_variables(dataset.id, owner_id):
+        resolved_skills = await resolve_skills([entry.selected_skill_id], dataset_id=dataset.id)
+        if not resolved_skills:
+            raise ValueError(
+                f"Skill '{entry.selected_skill_id}' was not found or is not visible "
+                f"in dataset '{dataset.name}'"
+            )
+
+        selected_skill = resolved_skills[0]
+        candidate_ids = entry.candidate_skill_ids or [str(selected_skill.id)]
+        success_score = (
+            UNSCORED_SKILL_RUN_SCORE if entry.success_score is None else entry.success_score
         )
 
-    selected_skill = resolved_skills[0]
-    candidate_ids = entry.candidate_skill_ids or [str(selected_skill.id)]
-    success_score = UNSCORED_SKILL_RUN_SCORE if entry.success_score is None else entry.success_score
+        run = SkillRun(
+            run_id=entry.run_id,
+            selected_skill_id=str(selected_skill.id),
+            selected_skill_name=selected_skill.name,
+            selected_skill=selected_skill,
+            dataset_scope=[str(dataset.id)],
+            task_text=entry.task_text,
+            result_summary=entry.result_summary,
+            success_score=success_score,
+            session_id=session_id or "agentic",
+            candidate_skills=[
+                CandidateSkill(
+                    skill_id=str(skill_id),
+                    skill_name=(
+                        selected_skill.name if str(skill_id) == str(selected_skill.id) else ""
+                    ),
+                )
+                for skill_id in candidate_ids
+            ],
+            task_pattern_id=entry.task_pattern_id,
+            router_version=entry.router_version,
+            tool_trace=_coerce_tool_trace(entry.tool_trace),
+            error_type=entry.error_type,
+            error_message=entry.error_message,
+            started_at_ms=entry.started_at_ms,
+            latency_ms=entry.latency_ms,
+            feedback=entry.feedback,
+        )
+        run.belongs_to_set = [
+            NodeSet(id=generate_node_id(f"NodeSet:{entry.node_set}"), name=entry.node_set)
+        ]
 
-    run = SkillRun(
-        run_id=entry.run_id,
-        selected_skill_id=str(selected_skill.id),
-        selected_skill_name=selected_skill.name,
-        dataset_scope=[str(dataset.id)],
-        task_text=entry.task_text,
-        result_summary=entry.result_summary,
-        success_score=success_score,
-        session_id=session_id or "agentic",
-        candidate_skills=[
-            CandidateSkill(
-                skill_id=str(skill_id),
-                skill_name=selected_skill.name if str(skill_id) == str(selected_skill.id) else "",
-            )
-            for skill_id in candidate_ids
-        ],
-        task_pattern_id=entry.task_pattern_id,
-        router_version=entry.router_version,
-        tool_trace=_coerce_tool_trace(entry.tool_trace),
-        error_type=entry.error_type,
-        error_message=entry.error_message,
-        started_at_ms=entry.started_at_ms,
-        latency_ms=entry.latency_ms,
-        feedback=entry.feedback,
-    )
-    run.belongs_to_set = [
-        NodeSet(id=generate_node_id(f"NodeSet:{entry.node_set}"), name=entry.node_set)
-    ]
-
-    await add_data_points([run], ctx=_make_storage_context(user, dataset, entry.run_id))
+        await add_data_points([run], ctx=_make_storage_context(user, dataset, entry.run_id))
 
     return run, dataset

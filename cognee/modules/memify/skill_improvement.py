@@ -8,7 +8,9 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from pydantic import BaseModel, Field
 
-from cognee.modules.engine.models import Skill, SkillImprovementProposal, SkillRun
+from cognee.context_global_variables import set_database_global_context_variables
+from cognee.modules.engine.models import NodeSet, Skill, SkillImprovementProposal, SkillRun
+from cognee.modules.engine.utils.generate_node_id import generate_node_id
 from cognee.modules.pipelines.models import PipelineContext
 from cognee.modules.tools.resolve_skills import find_skill_by_id, find_skill_by_name
 from cognee.shared.logging_utils import get_logger
@@ -27,6 +29,10 @@ class SkillImprovementDraft(BaseModel):
 def _dataset_scope(dataset) -> list[str]:
     dataset_id = getattr(dataset, "id", None)
     return [str(dataset_id)] if dataset_id is not None else []
+
+
+def _skills_node_set() -> NodeSet:
+    return NodeSet(id=generate_node_id("NodeSet:skills"), name="skills")
 
 
 def _storage_context(user, dataset, key: str) -> Optional[PipelineContext]:
@@ -87,56 +93,63 @@ async def improve_skill(
     dataset_id = getattr(dataset, "id", None)
     if dataset_id is None:
         raise ValueError("Skill improvement requires one explicit dataset.")
+    if apply and not proposal_id:
+        raise ValueError("skill_improvement apply=True requires proposal_id.")
 
-    if apply:
-        if not proposal_id:
-            raise ValueError("skill_improvement apply=True requires proposal_id.")
-        return await _apply_proposal(
-            proposal_id=proposal_id,
-            skill_name=skill_name,
+    owner_id = getattr(dataset, "owner_id", None) or getattr(user, "id", None)
+    if owner_id is None:
+        raise ValueError("Skill improvement requires a dataset owner or user.")
+
+    async with set_database_global_context_variables(dataset_id, owner_id):
+        if apply:
+            return await _apply_proposal(
+                proposal_id=proposal_id,
+                skill_name=skill_name,
+                dataset_id=dataset_id,
+                dataset=dataset,
+                user=user,
+            )
+
+        skill = await find_skill_by_name(skill_name, dataset_id=dataset_id)
+        if skill is None:
+            raise ValueError(f"Skill {skill_name!r} was not found in dataset {dataset.name!r}.")
+
+        runs = await _find_recent_failure_runs(
             dataset_id=dataset_id,
-            dataset=dataset,
-            user=user,
+            skill_id=str(skill.id),
+            skill_name=skill.name,
+            score_threshold=score_threshold,
+            max_runs=max_runs,
         )
+        if not runs:
+            logger.info("No low-scoring or errored SkillRun records for %s", skill.name)
+            return None
 
-    skill = await find_skill_by_name(skill_name, dataset_id=dataset_id)
-    if skill is None:
-        raise ValueError(f"Skill {skill_name!r} was not found in dataset {dataset.name!r}.")
+        draft = await _generate_proposal(skill, runs)
+        try:
+            from cognee.infrastructure.llm import get_llm_config
 
-    runs = await _find_recent_failure_runs(
-        dataset_id=dataset_id,
-        skill_id=str(skill.id),
-        skill_name=skill.name,
-        score_threshold=score_threshold,
-        max_runs=max_runs,
-    )
-    if not runs:
-        logger.info("No low-scoring or errored SkillRun records for %s", skill.name)
-        return None
-
-    draft = await _generate_proposal(skill, runs)
-    try:
-        from cognee.infrastructure.llm import get_llm_config
-
-        model_name = get_llm_config().llm_model
-    except Exception:
-        model_name = ""
-    proposal = SkillImprovementProposal(
-        proposal_id=str(uuid4()),
-        skill_id=str(skill.id),
-        skill_name=skill.name,
-        dataset_scope=_dataset_scope(dataset),
-        old_procedure=skill.procedure,
-        proposed_procedure=draft.proposed_procedure,
-        runs_used=[run.run_id for run in runs],
-        model_name=model_name,
-        confidence=draft.confidence,
-        rationale=draft.rationale,
-        status="proposed",
-        belongs_to_set=["skills"],
-    )
-    await add_data_points([proposal], ctx=_storage_context(user, dataset, proposal.proposal_id))
-    return proposal
+            model_name = get_llm_config().llm_model
+        except Exception:
+            model_name = ""
+        proposal = SkillImprovementProposal(
+            proposal_id=str(uuid4()),
+            skill_id=str(skill.id),
+            skill_name=skill.name,
+            skill=skill,
+            dataset_scope=_dataset_scope(dataset),
+            old_procedure=skill.procedure,
+            proposed_procedure=draft.proposed_procedure,
+            runs_used=[run.run_id for run in runs],
+            runs=runs,
+            model_name=model_name,
+            confidence=draft.confidence,
+            rationale=draft.rationale,
+            status="proposed",
+            belongs_to_set=[_skills_node_set()],
+        )
+        await add_data_points([proposal], ctx=_storage_context(user, dataset, proposal.proposal_id))
+        return proposal
 
 
 async def _apply_proposal(
@@ -165,7 +178,9 @@ async def _apply_proposal(
     skill.search_text = "\n\n".join(
         part for part in (skill.name, skill.description, skill.procedure) if part
     )
+    skill.belongs_to_set = [_skills_node_set()]
     proposal.status = "applied"
+    proposal.belongs_to_set = [_skills_node_set()]
 
     await add_data_points(
         [skill, proposal],
@@ -258,13 +273,22 @@ async def _load_nodes_by_type(model):
             return []
 
     get_nodeset = getattr(graph_engine, "get_nodeset_subgraph", None)
-    if get_nodeset is None:
+    if get_nodeset is not None:
+        try:
+            nodes, _ = await get_nodeset(node_type=model, node_name=["skills"])
+            if nodes:
+                return nodes
+        except Exception as exc:
+            logger.warning("Skill improvement nodeset lookup failed: %s", exc)
+
+    get_graph_data = getattr(graph_engine, "get_graph_data", None)
+    if get_graph_data is None:
         return []
     try:
-        nodes, _ = await get_nodeset(node_type=model, node_name=["skills"])
+        nodes, _ = await get_graph_data()
         return nodes
     except Exception as exc:
-        logger.warning("Skill improvement nodeset lookup failed: %s", exc)
+        logger.warning("Skill improvement full graph lookup failed: %s", exc)
         return []
 
 

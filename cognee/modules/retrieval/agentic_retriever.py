@@ -22,6 +22,7 @@ from cognee.modules.engine.models import Skill, Tool
 from cognee.modules.engine.models.SkillRun import ToolCall as SkillRunToolCall
 from cognee.modules.retrieval.graph_completion_retriever import GraphCompletionRetriever
 from cognee.modules.retrieval.utils.completion import generate_completion
+from cognee.modules.retrieval.utils.validate_queries import validate_retriever_input
 from cognee.modules.tools.context import active_skills_var, opened_skills_var
 from cognee.modules.tools.errors import (
     ToolInvocationError,
@@ -120,15 +121,31 @@ class AgenticRetriever(GraphCompletionRetriever):
         methods on this class consume a richer bundle — the search pipeline passes
         this object through verbatim to get_context_from_objects.
         """
-        triplets = await super().get_retrieved_objects(query=query, query_batch=query_batch)
-
         skills = await resolve_skills(
             self.explicit_skills,
             dataset_id=self.dataset_id,
         )
         tools = await self._resolve_active_tools(skills)
+        triplets = []
+
+        if await self._graph_has_edges():
+            triplets = await super().get_retrieved_objects(query=query, query_batch=query_batch)
+        else:
+            validate_retriever_input(query, query_batch, self._use_session_cache())
 
         return {"triplets": triplets, "skills": skills, "tools": tools}
+
+    async def _graph_has_edges(self) -> bool:
+        """A skills-only graph has no memory triplets to retrieve."""
+        from cognee.infrastructure.databases.graph import get_graph_engine
+
+        try:
+            graph_engine = await get_graph_engine()
+            _, edges = await graph_engine.get_graph_data()
+        except Exception as exc:
+            logger.warning("Unable to inspect graph edges before agentic retrieval: %s", exc)
+            return True
+        return bool(edges)
 
     async def _resolve_active_tools(self, skills: List[Skill]) -> List[Tool]:
         """Ambient tools intersected with skill-declared tools (union across skills)."""
@@ -158,11 +175,14 @@ class AgenticRetriever(GraphCompletionRetriever):
                 query=query, query_batch=query_batch, retrieved_objects=retrieved_objects
             )
 
-        memory_text = await super().get_context_from_objects(
-            query=query,
-            query_batch=query_batch,
-            retrieved_objects=retrieved_objects.get("triplets"),
-        )
+        triplets = retrieved_objects.get("triplets")
+        memory_text = ""
+        if triplets:
+            memory_text = await super().get_context_from_objects(
+                query=query,
+                query_batch=query_batch,
+                retrieved_objects=triplets,
+            )
         if isinstance(memory_text, list):
             memory_text = "\n\n".join(memory_text)
 
@@ -293,6 +313,7 @@ class AgenticRetriever(GraphCompletionRetriever):
                 run_id=f"agentic:{s.id}:{uuid4()}",
                 selected_skill_id=str(s.id),
                 selected_skill_name=s.name,
+                selected_skill=s,
                 dataset_scope=dataset_scope,
                 task_text=task_text,
                 success_score=resolved_score,

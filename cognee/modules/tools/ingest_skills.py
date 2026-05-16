@@ -8,7 +8,8 @@ from types import SimpleNamespace
 from typing import List, Optional, Tuple, Union
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from cognee.modules.engine.models import Skill
+from cognee.modules.engine.models import NodeSet, Skill
+from cognee.modules.engine.utils.generate_node_id import generate_node_id
 from cognee.modules.pipelines.models import PipelineContext
 from cognee.modules.tools.path_safety import trusted_is_dir, trusted_is_file, trusted_rglob
 from cognee.shared.logging_utils import get_logger
@@ -145,11 +146,12 @@ async def add_skills(
         return []
 
     dataset_id = dataset.id
+    node_set_point = NodeSet(id=generate_node_id(f"NodeSet:{node_set}"), name=node_set)
     scoped: List[Skill] = []
     for skill in parsed:
         skill.id = _scoped_skill_id(dataset_id, skill)
         skill.dataset_scope = [str(dataset_id)]
-        skill.belongs_to_set = [node_set]
+        skill.belongs_to_set = [node_set_point]
         if not skill.search_text:
             skill.search_text = "\n\n".join(
                 part for part in (skill.name, skill.description, skill.procedure) if part
