@@ -229,13 +229,22 @@ class DatabaseContextManager:
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
-        # Lazily import to avoid circular imports at module load.
+        if not backend_access_control_enabled():
+            return None
+
+        # Evict this dataset's engine entries from the LRU caches before
+        # releasing the queue slot. This guarantees the freed slot and the
+        # freed cache entry are the same dataset, so the LRU never evicts
+        # a still-active dataset's adapter to make room for a new one.
+        from cognee.infrastructure.databases.graph.get_graph_engine import evict_graph_engine
+        from cognee.infrastructure.databases.vector.create_vector_engine import evict_vector_engine
+
+        evict_graph_engine(**get_graph_context_config())
+        evict_vector_engine(**get_vectordb_context_config())
+
         from cognee.infrastructure.databases.dataset_queue import dataset_queue
 
-        # Release the slot for this dataset when exiting the context.
-        if backend_access_control_enabled():
-            dataset_queue().release_slot_for(self._dataset)
-        return None
+        dataset_queue().release_slot_for(self._dataset)
 
 
 def set_database_global_context_variables(
