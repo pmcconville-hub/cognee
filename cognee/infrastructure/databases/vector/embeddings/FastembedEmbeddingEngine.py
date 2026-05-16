@@ -86,7 +86,7 @@ class FastembedEmbeddingEngine(EmbeddingEngine):
         stop=stop_after_delay(128),
         wait=wait_exponential_jitter(8, 128),
         retry=retry_if_not_exception_type((litellm.exceptions.NotFoundError, EmbeddingException)),
-        before_sleep=before_sleep_log(logger, logging.DEBUG),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
         reraise=True,
     )
     async def embed_text(self, text: List[str]) -> List[List[float]]:

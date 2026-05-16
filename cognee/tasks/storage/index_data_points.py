@@ -51,8 +51,8 @@ async def index_data_points(data_points: list[DataPoint], vector_engine=None):
             indexed_data_point.metadata["index_fields"] = [field_name]
             data_points_by_type[type_name][field_name].append(indexed_data_point)
 
-    BATCH_SIZE = 25
-    semaphore = asyncio.Semaphore(5)
+    batch_size = vector_engine.embedding_engine.get_batch_size()
+    semaphore = asyncio.Semaphore(4)
 
     async def _index_batch(type_name, field_name, batch):
         async with semaphore:
@@ -61,8 +61,8 @@ async def index_data_points(data_points: list[DataPoint], vector_engine=None):
     tasks = []
     for type_name, fields in data_points_by_type.items():
         for field_name, points in fields.items():
-            for i in range(0, len(points), BATCH_SIZE):
-                batch = points[i : i + BATCH_SIZE]
+            for i in range(0, len(points), batch_size):
+                batch = points[i : i + batch_size]
                 tasks.append(asyncio.create_task(_index_batch(type_name, field_name, batch)))
 
     await asyncio.gather(*tasks)

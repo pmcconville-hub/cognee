@@ -28,7 +28,7 @@ def _resolve_embedding_dimensions(provider: Optional[str], model: Optional[str])
 
     provider_lower = provider.lower()
     # Strip "openai/" / "azure/" / etc. prefix from "openai/text-embedding-3-large"
-    bare_model = model.split("/", 1)[1] if "/" in model else model
+    bare_model = model.split("/")[-1] if "/" in model else model
     candidates = [model, bare_model, f"{provider_lower}/{bare_model}"]
 
     if provider_lower == "fastembed":
